@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ein langlebiger Factory-HttpClient kann DNS-Wechsel trotzdem verpassen</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--surface:#fff;--text:#1f2937;--muted:#667085;--border:#d9dee7;--accent:#3559d8;--code:#111827;--codet:#e5e7eb;--surface2:#f0f2f5}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1218;--surface:#171c24;--text:#e8edf5;--muted:#aeb7c7;--border:#303847;--accent:#91a8ff;--surface2:#212733}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;line-height:1.72}main{width:min(900px,calc(100% - 32px));margin:48px auto;padding:clamp(24px,4vw,56px);background:var(--surface);border:1px solid var(--border);border-radius:18px}h1,h2{line-height:1.2}h1{font-size:clamp(2rem,4.5vw,3.1rem);margin:0 0 12px}.meta{color:var(--muted);margin-bottom:2rem}.callout{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:15px 17px;margin:1rem 0}pre{background:var(--code);color:var(--codet);overflow:auto;padding:18px;border-radius:12px}code{font-family:Consolas,monospace}a{color:var(--accent)}.mermaid{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:18px}hr{border:0;border-top:1px solid var(--border);margin:3rem 0 1.2rem}.footer{color:var(--muted);display:grid;gap:8px}
+</style>
+</head>
+<body><main>
+<h1>Ein langlebiger Factory-HttpClient kann DNS-Wechsel trotzdem verpassen</h1>
+<div class="meta">Kommunikation · .NET 10 / IHttpClientFactory / SocketsHttpHandler · Fortgeschritten · ~7 min</div>
+<h2>TL;DR</h2>
+<p><code>IHttpClientFactory</code> löst DNS-Wechsel nur dann zuverlässig, wenn neu erzeugte Clients auch tatsächlich neue beziehungsweise rotierte Handler nutzen können. Hält ein Singleton denselben Factory-Client dauerhaft fest, bleibt dieser an seinem ursprünglichen Handler gebunden.</p>
+<h2>Prerequisites</h2>
+<ul><li><a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/http-client">Microsoft Learn: IHttpClientFactory</a></li><li><a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/httpclient-factory-troubleshooting">Microsoft Learn: Troubleshooting</a></li><li><a href="https://learn.microsoft.com/en-us/dotnet/api/system.net.http.socketshttphandler.pooledconnectionlifetime?view=net-10.0">Microsoft Learn: PooledConnectionLifetime</a></li></ul>
+<h2>Der Aha-Effekt</h2>
+<p>Die Factory verwaltet vor allem <code>HttpMessageHandler</code>-Instanzen. Ein neuer <code>CreateClient()</code>-Aufruf kann nach Ablauf der Handler-Lifetime einen anderen Handler erhalten. Ein bereits existierender <code>HttpClient</code> wechselt seinen Handler aber nicht nachträglich.</p>
+<div class="callout"><strong>Aha:</strong> Handler-Rotation hilft nur neuen Clients. Ein festgehaltener Client bleibt an seiner alten Handler-Instanz hängen.</div>
+<h2>Im Projektkontext</h2>
+<p>Bei ASP.NET Core in Docker oder Kubernetes können sich Ziel-IP-Adressen ändern, während DNS-Namen stabil bleiben. Genau dort wird die Lebensdauer von Handlern und Connections relevant.</p>
+<h2>So macht man es falsch</h2>
+<pre><code>builder.Services.AddHttpClient&lt;InventoryClient&gt;();
+builder.Services.AddSingleton&lt;InventoryCache&gt;();
+
+public sealed class InventoryCache
+{
+    private readonly InventoryClient _client;
+
+    public InventoryCache(InventoryClient client)
+        =&gt; _client = client;
+}</code></pre>
+<h2>Warum ist das falsch?</h2>
+<p>Wird der Typed Client einmal in einem Singleton erzeugt, lebt auch dessen interner <code>HttpClient</code> entsprechend lange. Die Factory kann zwar für zukünftige Clients neue Handler bereitstellen, aber der Singleton fragt keinen neuen Client mehr an. Bei einem DNS-Wechsel kann das zu veralteten Verbindungen führen.</p>
+<h2>So macht man es richtig</h2>
+<pre><code>public sealed class InventoryCache
+{
+    private readonly IHttpClientFactory _factory;
+
+    public InventoryCache(IHttpClientFactory factory)
+        =&gt; _factory = factory;
+
+    public async Task&lt;string&gt; LoadAsync(CancellationToken ct)
+    {
+        using var client = _factory.CreateClient("Inventory");
+        return await client.GetStringAsync("/api/inventory", ct);
+    }
+}</code></pre>
+<p>Alternativ kann ein bewusst langlebiger Client mit <code>SocketsHttpHandler.PooledConnectionLifetime</code> verwendet werden. Dann wird die DNS-Aktualisierung stärker über das Connection-Recycling gesteuert.</p>
+<h2>Diagramm</h2>
+<div class="mermaid">
+sequenceDiagram
+    participant S as Singleton
+    participant F as IHttpClientFactory
+    participant H1 as Handler A
+    participant H2 as Handler B
+    S->>F: CreateClient()
+    F-->>S: Client + Handler A
+    Note over F,H1: HandlerLifetime läuft ab
+    F->>H2: neuer Handler für neue Clients
+    S->>H1: alter Client bleibt bei Handler A
+</div>
+<h2>Fallstricke am Rand</h2>
+<ul><li>Typed Clients nicht indirekt in Singletons festhalten.</li><li><code>PooledConnectionLifetime</code> löst ein anderes Lifetime-Problem als Handler-Rotation.</li><li>Retry behebt stale DNS nicht, sondern reagiert nur auf Fehler.</li></ul>
+<h2>Selbst ausprobieren</h2>
+<p>Erzeuge einen Named Client mit kurzer Handler-Lifetime. Halte einen Client dauerhaft fest und rufe parallel regelmäßig <code>CreateClient()</code> auf. Beobachte, dass nur neu erzeugte Clients von der Handler-Rotation profitieren.</p>
+<h2>Verwandte Themen</h2>
+<ul><li><strong>DelegatingHandler-Lifetime:</strong> wichtig für DI-Scopes.</li><li><strong>HTTP/2:</strong> beeinflusst Connection-Pooling.</li><li><strong>Kubernetes Service Discovery:</strong> DNS-Namen bleiben stabil, Endpoints nicht zwingend.</li><li><strong>Polly:</strong> Resilience ist kein Ersatz für korrektes Connection-Lifetime-Management.</li></ul>
+<h2>Quellen</h2>
+<ul><li><a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/http-client">Microsoft Learn: IHttpClientFactory</a></li><li><a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/httpclient-factory-troubleshooting">Microsoft Learn: Troubleshoot IHttpClientFactory issues</a></li><li><a href="https://learn.microsoft.com/en-us/dotnet/api/system.net.http.socketshttphandler.pooledconnectionlifetime?view=net-10.0">Microsoft Learn: PooledConnectionLifetime — .NET 10</a></li></ul>
+<hr>
+<div class="footer"><div><strong>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei):</strong> 03.10.2026 | Ein langlebiger Factory-HttpClient kann DNS-Wechsel trotzdem verpassen | Kommunikation | Fortgeschritten</div><div><strong>Bereich-Rotation:</strong> heute Kommunikation → morgen z. B. Cache &amp; State</div><div><strong>Unsicher geblieben:</strong> nichts</div></div>
+</main>
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";mermaid.initialize({startOnLoad:true,theme:window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default",securityLevel:"strict"});</script>
+</body>
+</html>
