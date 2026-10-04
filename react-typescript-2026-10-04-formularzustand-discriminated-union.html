@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Discriminated Unions und React-Reducer: Status, Pflichtdaten und Übergänge eines Formulars präzise modellieren."><title>Ein Formularzustand braucht mehr als drei Booleans</title><style>
+:root{color-scheme:light dark;--bg:#fff;--ink:#242424;--muted:#666;--line:#dededb;--soft:#f6f6f3;--accent:#24724d}
+@media(prefers-color-scheme:dark){:root{--bg:#171a19;--ink:#e6e8e4;--muted:#b0b8af;--line:#3b433d;--soft:#222824;--accent:#91cfaa}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:20px/1.7 Georgia,'Times New Roman',serif}
+nav{border-bottom:1px solid var(--line);padding:18px 5%;font:600 13px system-ui;letter-spacing:.08em}nav a{text-decoration:none}
+main{max-width:800px;margin:60px auto 80px;padding:0 28px}h1,h2,.subtitle,.meta,.eyebrow,figcaption,aside,.caption,.sources,footer{font-family:system-ui,-apple-system,'Segoe UI',sans-serif}
+h1{font-size:clamp(36px,6vw,52px);line-height:1.12;letter-spacing:-.04em;margin:14px 0 20px}h2{font-size:27px;line-height:1.3;letter-spacing:-.025em;margin:44px 0 18px}
+.eyebrow{font-size:12px;letter-spacing:.13em;color:var(--accent)}.subtitle{font-size:23px;line-height:1.5;color:var(--muted);margin:18px 0}.meta{font-size:13px;color:var(--muted);padding-bottom:25px;border-bottom:1px solid var(--line);line-height:1.65}
+p{margin:22px 0}a{color:var(--accent);text-underline-offset:3px}code{font: .8em ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--soft);padding:2px 4px;border-radius:3px}
+.code{margin:26px 0}figcaption{color:var(--muted);font-size:12px;margin-bottom:8px}pre{background:var(--soft);padding:22px;border:1px solid var(--line);border-radius:5px;overflow:auto;font:14px/1.7 ui-monospace,Consolas,monospace}pre code{font:inherit;background:none;padding:0;white-space:pre}
+.diagram{border:1px solid var(--line);padding:20px;border-radius:5px;overflow:auto}.diagram pre{border:0;margin:0}.diagram svg{max-width:100%;height:auto}
+.caption{font-size:14px;color:var(--muted);line-height:1.6}aside{font-size:14px;line-height:1.65;background:var(--soft);padding:18px 22px;border-left:3px solid var(--accent);margin:28px 0}
+li{margin:14px 0}.sources,footer{font-size:14px;line-height:1.65;color:var(--muted)}.sources{padding-left:22px}footer{margin-top:38px}hr{border:0;border-top:1px solid var(--line)}
+@media(max-width:600px){main{margin-top:32px;padding:0 20px}body{font-size:18px}.subtitle{font-size:20px}h2{font-size:24px}pre{padding:16px;font-size:12px}.diagram{padding:10px}}
+@media print{body{font-size:11pt}nav{display:none}main{max-width:none;margin:0}h1{font-size:28pt}h2{break-after:avoid}pre,pre code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt}}
+</style></head><body><nav><a href="index.html">TECH-ARTIKEL / TYPESCRIPT &amp; REACT</a></nav><main><article>
+<header><p class="eyebrow">TYPESCRIPT / REACT · ZUSTANDSMODELLIERUNG</p>
+<h1>Ein Formularzustand braucht mehr als drei Booleans</h1>
+<p class="subtitle">Eine Discriminated Union verbindet Status und Daten. Erst explizite Übergänge machen daraus einen verlässlichen Ablauf.</p>
+<p class="meta">04.10.2026 · Frontend-Architektur · TypeScript 6.0 / React 19.3-Dokumentation · Tief · ~8 min</p></header>
+<p>Ein Formular speichert erfolgreich, zeigt aber weiterhin den Fehler des vorherigen Versuchs. Der Request war korrekt. Die Oberfläche verrät trotzdem zwei verschiedene Geschichten. Beim Retry wurde <code>isSubmitting</code> gesetzt, nach dem Erfolg <code>isSuccess</code>; die alte Fehlermeldung blieb stehen.</p>
+<p>Solche Fehler entstehen leicht, wenn Status und Nutzdaten unabhängig voneinander modelliert werden. Die entscheidende Design-Frage lautet: Welche Kombinationen darf dieses Formular überhaupt annehmen?</p>
+<h2>TL;DR</h2>
+<p>Modelliere exklusive Phasen als Union mit einem gemeinsamen Diskriminator. Verknüpfe die Daten mit der Phase, in der sie benötigt werden. Ein Reducer beschreibt erlaubte Übergänge. Damit trennst du zwei Garantien sauber: gültige Zustandsformen im Typsystem und gültige Abläufe zur Laufzeit.</p>
+<h2>Prerequisites</h2>
+<p>Du solltest <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions">Discriminated Unions</a>, <a href="https://react.dev/reference/react/useReducer">useReducer</a> und asynchrone Event-Handler kennen. Der Versionsbezug stammt aus den <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript-6.0-Release-Notes</a> und der aktuellen React-Dokumentation; das Muster benötigt keine neue Versionsfunktion.</p>
+<h2>Der Aha-Effekt</h2>
+<p>Ein Status-String allein reicht noch nicht. Bei <code>{ status, error?, receiptId? }</code> bleiben erfolgreiche Antworten ohne Belegnummer und Fehlerzustände ohne Meldung darstellbar. Die Union koppelt dagegen jede Phase an ihre Pflichtdaten: Erfolg enthält eine Belegnummer, Fehler enthält Meldung und Entwurf.</p>
+<p>Nach einer Prüfung von <code>state.status</code> grenzt TypeScript die mögliche Variante ein. Du brauchst weder eine Non-null Assertion noch einen Cast, um die zugehörigen Daten zu lesen. Das ist der dokumentierte Narrowing-Mechanismus. <a href="#quelle-ts">[1]</a></p>
+<h2>So macht man es falsch</h2>
+<p>Separate State-Variablen sind kein Fehler an sich. Problematisch wird diese realistische Retry-Implementierung, weil jeder Handler mehrere zusammengehörige Werte synchron halten muss:</p>
+<figure class="code"><figcaption>Fehlervariante · Event-Handler-Ausschnitt, keine vollständige Komponente</figcaption><pre><code>// Ausschnitt aus einem React-Event-Handler.
+// Beim Retry bleibt die frühere Fehlermeldung erhalten.
+setIsSubmitting(true);
+try {
+  const id = await save(draft);
+  setReceiptId(id);
+  setIsSuccess(true);
+} catch {
+  setError(&quot;Speichern fehlgeschlagen.&quot;);
+} finally {
+  setIsSubmitting(false);
+}</code></pre></figure>
+<h2>Warum ist das falsch?</h2>
+<p>Nach einem Fehler bleibt <code>error</code> befüllt. Der nächste erfolgreiche Versuch ändert diesen Wert nicht. Renderst du Meldung und Erfolgsansicht unabhängig, erscheinen beide. Eine andere Reihenfolge der Bedingungen versteckt den Widerspruch lediglich.</p>
+<p>React empfiehlt, widersprüchliche Zustände zu vermeiden. <a href="#quelle-state">[2]</a> Batching kann mehrere Updates zusammenfassen, repariert aber keine ausgelassene Zuweisung. <a href="#quelle-reducer">[3]</a> Auch ein einziger Objekt-State mit optionalen Feldern löst die fehlende Beziehung zwischen Status und Daten nicht automatisch.</p>
+<p>Die folgende Modellierung ist eine konkrete Designentscheidung für ein Formular: Während des Speicherns sind Änderungen gesperrt; nach einem Fehler bleibt der Entwurf verfügbar; nach Erfolg wird nur der Beleg benötigt.</p>
+<h2>So macht man es richtig</h2>
+<p>Lege die Zustandsformen und Übergänge in <code>state.ts</code> zusammen ab. Unpassende, aber bekannte Actions werden hier bewusst ignoriert. Diese Policy ist Teil des Beispiels, keine Vorgabe von React.</p>
+<figure class="code"><figcaption>state.ts · vollständiges, React-unabhängiges Modell</figcaption><pre><code>export type Draft = { text: string };
+export type State =
+  | { status: &quot;editing&quot;; draft: Draft }
+  | { status: &quot;submitting&quot;; draft: Draft }
+  | { status: &quot;failed&quot;; draft: Draft; message: string }
+  | { status: &quot;success&quot;; receiptId: string };
+
+export type Action =
+  | { type: &quot;changed&quot;; text: string }
+  | { type: &quot;submitted&quot; }
+  | { type: &quot;succeeded&quot;; receiptId: string }
+  | { type: &quot;failed&quot;; message: string }
+  | { type: &quot;reset&quot; };
+
+export const initialState: State = {
+  status: &quot;editing&quot;,
+  draft: { text: &quot;&quot; },
+};
+
+export function assertNever(value: never): never {
+  throw new Error(&quot;Unbehandelter Fall&quot;);
+}
+
+export function reducer(state: State, action: Action): State {
+  switch (action.type) {
+    case &quot;changed&quot;:
+      if (state.status !== &quot;editing&quot; &amp;&amp;
+          state.status !== &quot;failed&quot;) return state;
+      return { status: &quot;editing&quot;, draft: { text: action.text } };
+    case &quot;submitted&quot;:
+      if (state.status !== &quot;editing&quot; &amp;&amp;
+          state.status !== &quot;failed&quot;) return state;
+      return { status: &quot;submitting&quot;, draft: state.draft };
+    case &quot;succeeded&quot;:
+      if (state.status !== &quot;submitting&quot;) return state;
+      return { status: &quot;success&quot;, receiptId: action.receiptId };
+    case &quot;failed&quot;:
+      if (state.status !== &quot;submitting&quot;) return state;
+      return {
+        status: &quot;failed&quot;,
+        draft: state.draft,
+        message: action.message,
+      };
+    case &quot;reset&quot;:
+      return state.status === &quot;success&quot; ? initialState : state;
+    default:
+      return assertNever(action);
+  }
+}</code></pre></figure>
+<p><code>assertNever</code> meldet beim Typprüfen eine nicht behandelte neue Action-Variante. <a href="#quelle-ts">[1]</a> Die Guards beantworten eine andere Frage: Darf <code>succeeded</code> ausgerechnet jetzt wirken? Eine Union verhindert nicht, dass du eine gültige Action im falschen Zustand dispatchst.</p>
+<p>Die Komponente erhält <code>save</code> als Abhängigkeit. Diese Funktion übernimmt Transport und Antwortvalidierung und liefert eine Belegnummer. Der Reducer bleibt rein; Netzwerkzugriffe gehören nicht hinein. <a href="#quelle-reducer">[3]</a> Der Ref blockiert einen weiteren lokalen Aufruf, bevor ein Render den Button deaktiviert.</p>
+<figure class="code"><figcaption>Form.tsx · vollständige Komponente, save wird als Prop übergeben</figcaption><pre><code>import { useReducer, useRef } from &quot;react&quot;;
+import { initialState, reducer } from &quot;./state&quot;;
+import type { Draft } from &quot;./state&quot;;
+
+type Props = { save: (draft: Draft) =&gt; Promise&lt;string&gt; };
+
+export function Form({ save }: Props) {
+  const [state, dispatch] = useReducer(reducer, initialState);
+  const inFlight = useRef(false);
+
+  async function submit() {
+    if (inFlight.current ||
+        (state.status !== &quot;editing&quot; &amp;&amp; state.status !== &quot;failed&quot;)) {
+      return;
+    }
+    inFlight.current = true;
+    dispatch({ type: &quot;submitted&quot; });
+    try {
+      const receiptId = await save(state.draft);
+      dispatch({ type: &quot;succeeded&quot;, receiptId });
+    } catch {
+      dispatch({ type: &quot;failed&quot;, message: &quot;Speichern fehlgeschlagen.&quot; });
+    } finally {
+      inFlight.current = false;
+    }
+  }
+
+  if (state.status === &quot;success&quot;) {
+    return (
+      &lt;section&gt;
+        &lt;p role=&quot;status&quot;&gt;Gespeichert: {state.receiptId}&lt;/p&gt;
+        &lt;button onClick={() =&gt; dispatch({ type: &quot;reset&quot; })}&gt;
+          Neues Formular
+        &lt;/button&gt;
+      &lt;/section&gt;
+    );
+  }
+
+  return (
+    &lt;form onSubmit={event =&gt; {
+      event.preventDefault();
+      void submit();
+    }}&gt;
+      &lt;label&gt;
+        Nachricht
+        &lt;textarea
+          value={state.draft.text}
+          disabled={state.status === &quot;submitting&quot;}
+          onChange={event =&gt;
+            dispatch({ type: &quot;changed&quot;, text: event.target.value })}
+        /&gt;
+      &lt;/label&gt;
+      &lt;button disabled={state.status === &quot;submitting&quot;} type=&quot;submit&quot;&gt;
+        {state.status === &quot;submitting&quot; ? &quot;Speichert …&quot; : &quot;Speichern&quot;}
+      &lt;/button&gt;
+      {state.status === &quot;failed&quot; &amp;&amp; &lt;p role=&quot;alert&quot;&gt;{state.message}&lt;/p&gt;}
+    &lt;/form&gt;
+  );
+}</code></pre></figure>
+<p>Nach einem Fehler führt eine Änderung zurück zu <code>editing</code> und entfernt die alte Meldung. Ein Retry wechselt direkt zu <code>submitting</code>. Erfolg trägt ausschließlich seine eigenen Daten. Diese Entscheidungen sind jetzt sichtbar und einzeln prüfbar.</p>
+<p>Für einen kleinen Ablauf kannst du dieselbe Union auch mit <code>useState</code> verwenden. Der Reducer lohnt sich, sobald mehrere Ereignisse dieselben Übergangsregeln benötigen. Sein Preis sind zusätzliche Typen und Actions. Bei umfangreichen parallelen Abläufen kann eine State-Machine-Bibliothek geeigneter sein; ein Reducer macht solche Abläufe nicht automatisch korrekt.</p>
+<h2>Diagramm</h2>
+<div class="diagram"><pre class="mermaid">stateDiagram-v2
+  direction TB
+  [*] --&gt; editing
+  editing --&gt; submitting: submitted
+  submitting --&gt; success: succeeded
+  submitting --&gt; failed: failed
+  failed --&gt; submitting: submitted
+  failed --&gt; editing: changed
+  success --&gt; editing: reset</pre></div>
+<p class="caption">Bearbeiten führt zum Speichern; dessen Ergebnis führt zu Erfolg oder Fehler. Fehler erlaubt Retry oder Änderung, Erfolg einen Reset. Nicht eingezeichnet: Änderungen innerhalb von editing sowie unveränderte Zustände bei abgelehnten Actions.</p>
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li><strong>Parallelität:</strong> Das Beispiel erlaubt einen lokalen Request. Bei Abbruch und Neustart brauchst du Request-Identitäten, damit alte Antworten keinen neuen Zustand überschreiben.</li>
+<li><strong>Doppelte Speicherung:</strong> Eine UI-Sperre ersetzt keine serverseitige Idempotenz, etwa bei Wiederholungen nach einem Verbindungsabbruch.</li>
+<li><strong>Externe Daten:</strong> Die Union validiert kein API-JSON. Prüfe die Antwort, bevor du <code>succeeded</code> erzeugst.</li>
+<li><strong>Reinheit:</strong> Mutationen und Side Effects im Reducer erschweren reproduzierbare Übergänge; React Strict Mode ruft ihn in der Entwicklung zusätzlich auf. <a href="#quelle-reducer">[3]</a></li>
+</ul>
+<h2>Selbst ausprobieren</h2>
+<p>Plane zehn Minuten in einem React-/TypeScript-Projekt mit <code>strict: true</code>, DOM-Typen und <code>jsx: "react-jsx"</code> ein. Kopiere beide Dateien. Übergebe zunächst <code>save={async () =&gt; { throw new Error("Offline"); }}</code>, anschließend <code>save={async () =&gt; "42"}</code>. Prüfe: Der Entwurf bleibt nach Fehler erhalten; ein erfolgreicher Retry zeigt keine alte Meldung.</p>
+<p>Ergänze danach eine Action <code>{ type: "cancelled" }</code>, ohne den Reducer anzupassen. Beim Typprüfen sollte der Aufruf von <code>assertNever</code> scheitern. Ergänze erst dann die fachlich gewünschten Übergänge. So überprüfst du Vollständigkeit und Verhalten getrennt.</p>
+<aside><strong>Prüfstand dieses Artikels:</strong> Das unveränderte Reducer-Modell wurde unter Node.js 24 ausgeführt; sieben Assertions für Retry, Entwurfserhalt, abgelehnte Übergänge, Reset und Unveränderlichkeit bestanden. Ein TypeScript-Compiler und React-Abhängigkeiten waren hier nicht verfügbar; TSX-Kompilierung und React-Ausführung wurden daher nicht getestet.</aside>
+<h2>Verwandte Themen</h2>
+<p><strong>Request-Identitäten</strong> sichern Übergänge bei konkurrierenden Antworten. <strong>Runtime-Validierung</strong> schützt die Grenze zwischen JSON und typisierten Actions. <strong>Reducer-Tests</strong> überprüfen fachliche Übergänge statt Komponentenmarkup. <strong>Abgeleiteter State</strong> vermeidet zusätzliche Booleans, wenn der benötigte Wert bereits aus dem Status folgt.</p>
+<h2>Quellen</h2>
+<ol class="sources">
+<li id="quelle-ts"><a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html">TypeScript Handbook: Narrowing, Discriminated Unions und Exhaustiveness Checking</a></li>
+<li id="quelle-state"><a href="https://react.dev/learn/choosing-the-state-structure">React: Choosing the State Structure</a></li>
+<li id="quelle-reducer"><a href="https://react.dev/reference/react/useReducer">React 19.3-Dokumentation: useReducer</a></li>
+<li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0: Release Notes</a></li>
+<li><a href="https://mermaid.js.org/intro/">Mermaid: offizielle CDN-Einbindung</a></li>
+</ol>
+<footer><hr>
+<p><strong>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei):</strong> 2026-10-04 | Ein Formularzustand braucht mehr als drei Booleans | Frontend-Architektur | Tief</p>
+<p><strong>Bereich-Rotation:</strong> heute Frontend-Architektur → morgen z. B. TypeScript-API-Modellierung</p>
+<p><strong>Unsicher geblieben:</strong> TSX-Kompilierung und React-Laufzeitverhalten im Zielprojekt nicht ausgeführt.</p>
+</footer>
+</article></main>
+<script type="module">
+try {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({startOnLoad:false,securityLevel:'strict',
+    theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default'});
+  await mermaid.run({querySelector:'.mermaid'});
+} catch {
+  // Definition und erklärender Text bleiben auch ohne CDN lesbar.
+}
+</script>
+</body></html>
