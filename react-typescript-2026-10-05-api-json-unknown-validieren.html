@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Warum TypeScript-Typangaben keine API-Antworten validieren und wie unknown an der Systemgrenze sicher eingegrenzt wird."><title>Eine Typangabe validiert keine API-Antwort</title><style>
+:root{color-scheme:light dark;--bg:#fff;--ink:#242424;--muted:#686868;--line:#dededb;--soft:#f6f6f3;--accent:#236a49}
+@media(prefers-color-scheme:dark){:root{--bg:#171a19;--ink:#e6e8e4;--muted:#b0b8af;--line:#3b433d;--soft:#222824;--accent:#91cfaa}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:20px/1.7 Georgia,'Times New Roman',serif}
+nav{border-bottom:1px solid var(--line);padding:18px 5%;font:600 13px system-ui;letter-spacing:.08em}nav a{text-decoration:none;color:var(--ink)}
+main{max-width:800px;margin:60px auto 80px;padding:0 28px}h1,h2,.subtitle,.meta,.eyebrow,figcaption,aside,.caption,.sources,footer{font-family:system-ui,-apple-system,'Segoe UI',sans-serif}
+h1{font-size:clamp(36px,6vw,52px);line-height:1.12;letter-spacing:-.04em;margin:14px 0 20px}h2{font-size:27px;line-height:1.3;letter-spacing:-.025em;margin:44px 0 18px}
+.eyebrow{font-size:12px;letter-spacing:.13em;color:var(--accent)}.subtitle{font-size:23px;line-height:1.5;color:var(--muted);margin:18px 0}.meta{font-size:13px;color:var(--muted);padding-bottom:25px;border-bottom:1px solid var(--line);line-height:1.65}
+p{margin:22px 0}a{color:var(--accent);text-underline-offset:3px}code{font:.8em ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--soft);padding:2px 4px;border-radius:3px}
+figure{margin:26px 0}figcaption{color:var(--muted);font-size:12px;margin-bottom:8px}pre{background:var(--soft);padding:22px;border:1px solid var(--line);border-radius:5px;overflow:auto;font:14px/1.7 ui-monospace,Consolas,monospace}pre code{font:inherit;background:none;padding:0;white-space:pre}
+.diagram{border:1px solid var(--line);padding:20px;border-radius:5px;overflow:auto}.diagram pre{border:0;margin:0}.diagram svg{max-width:100%;height:auto}.caption{font-size:14px;color:var(--muted);line-height:1.6}
+aside{font-size:14px;line-height:1.65;background:var(--soft);padding:18px 22px;border-left:3px solid var(--accent);margin:28px 0}li{margin:14px 0}.sources,footer{font-size:14px;line-height:1.65;color:var(--muted)}.sources{padding-left:22px}footer{margin-top:38px}hr{border:0;border-top:1px solid var(--line)}
+@media(max-width:600px){main{margin-top:32px;padding:0 20px}body{font-size:18px}.subtitle{font-size:20px}h2{font-size:24px}pre{padding:16px;font-size:12px}.diagram{padding:10px}}
+@media print{body{font-size:11pt}nav{display:none}main{max-width:none;margin:0}h1{font-size:28pt}h2{break-after:avoid}pre,pre code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt}}
+</style></head><body><nav><a href="index.html">TECH-ARTIKEL / TYPESCRIPT &amp; REACT</a></nav><main><article>
+<header>
+  <p class="eyebrow">TYPESCRIPT / API-MODELLIERUNG</p>
+  <h1>Eine Typangabe validiert keine API-Antwort</h1>
+  <p class="subtitle">Warum <code>fetchJson&lt;User&gt;()</code> nur Vertrauen ausdrückt – und wie eine Boundary-Funktion aus <code>unknown</code> belastbare Domänendaten macht.</p>
+  <p class="meta">05.10.2026 · API-Modellierung · TypeScript 6.0 / Fetch API · Tief · ~8 min</p>
+</header>
+<p>Die Benutzerliste läuft seit Monaten. Dann liefert das Backend nach einem Deployment für eine einzelne Rolle plötzlich <code>"owner"</code> statt <code>"admin"</code>. Der TypeScript-Build bleibt grün. Erst im Browser fällt eine Verzweigung in den falschen Pfad.</p>
+<p>Das ist kein Versagen des Typsystems. Der Compiler hat nur den Vertrag geprüft, den der Client selbst behauptet hat. Die entscheidende Frage lautet deshalb nicht: „Welchen Typ möchte ich hier haben?“, sondern: „An welcher Stelle wird eine fremde Laufzeitstruktur nachweislich zu meinem Domänentyp?“</p>
+
+<h2>TL;DR</h2>
+<p>Behandle Daten aus HTTP, Storage, <code>postMessage</code> oder URL-Parametern zunächst als <code>unknown</code>. Validiere sie einmal an der Systemgrenze und gib erst danach einen präzisen Typ zurück. Ein <code>as User</code> und ein generisches <code>fetchJson&lt;User&gt;</code> erzeugen keine Laufzeitprüfung.</p>
+
+<h2>Prerequisites</h2>
+<p>Du solltest <a href="https://www.typescriptlang.org/docs/handbook/2/functions.html#unknown"><code>unknown</code></a>, <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#using-type-predicates">Narrowing und Type Predicates</a> sowie <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/json"><code>Response.json()</code></a> kennen. Der Artikel bezieht sich auf die TypeScript-6.0-Dokumentation; das gezeigte Boundary-Muster ist nicht an eine neue 6.0-Funktion gebunden.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Ein TypeScript-Typ existiert während der Prüfung des Quellcodes. Eine JSON-Antwort existiert erst zur Laufzeit. Zwischen beiden liegt keine automatische Verbindung. Type Assertions werden beim Kompilieren entfernt und verändern das Laufzeitverhalten nicht. <a href="#source-assertions">[1]</a></p>
+<p><code>unknown</code> macht diese Grenze sichtbar. Der Typ kann jeden Wert repräsentieren, erlaubt aber keine Nutzung, bevor Code ihn eingegrenzt hat. <a href="#source-unknown">[2]</a> Das wirkt zunächst umständlich. Genau diese Reibung zwingt die Anwendung dazu, Beweise dort zu erzeugen, wo Vertrauen beginnt.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Der folgende Helper sieht wiederverwendbar aus. Tatsächlich entscheidet allein der Aufrufer, was <code>T</code> sein soll. Die Implementierung kann diese Behauptung weder prüfen noch aus der Antwort ableiten:</p>
+<figure><figcaption>Fehlervariante · kompakt, aber ohne Laufzeitvalidierung</figcaption><pre><code>type User = {
+  id: string;
+  displayName: string;
+  role: &quot;admin&quot; | &quot;editor&quot; | &quot;viewer&quot;;
+};
+
+async function fetchJson&lt;T&gt;(url: string): Promise&lt;T&gt; {
+  const response = await fetch(url);
+  return (await response.json()) as T;
+}
+
+const user = await fetchJson&lt;User&gt;(&quot;/api/users/u-1&quot;);
+user.displayName.toUpperCase();</code></pre></figure>
+<p>Wenn <code>displayName</code> fehlt, meldet der Compiler nichts. Der Fehler erscheint erst bei <code>toUpperCase()</code> – weit entfernt von der eigentlichen Ursache.</p>
+
+<h2>Warum ist das falsch?</h2>
+<p><code>Response.json()</code> liest den Body und parst JSON. Das Ergebnis kann laut MDN jeder durch JSON darstellbare Wert sein: Objekt, Array, String, Zahl und mehr. <a href="#source-json">[3]</a> JSON-Syntaxprüfung ist daher keine Schemaprüfung.</p>
+<p>Auch <code>Promise&lt;User&gt;</code> hilft nicht. Die Return-Type-Angabe kontrolliert nur, ob der Funktionskörper aus Sicht des Compilers einen kompatiblen Wert liefert. Das <code>as T</code> liefert genau diese – unbelegte – Kompatibilität. Ein falscher Wert wandert anschließend als scheinbar vertrauenswürdiger <code>User</code> durch Cache, State und UI. Je später er auffällt, desto schlechter ist der Fehlerkontext.</p>
+
+<h2>So macht man es richtig</h2>
+<p>Die Boundary-Funktion akzeptiert <code>unknown</code>, prüft Struktur und erlaubte Werte und konstruiert anschließend ein neues <code>User</code>-Objekt. HTTP-Status, JSON-Syntax und Domänenschema bleiben drei getrennte Fehlerklassen.</p>
+<figure><figcaption>user-api.ts · vollständige Boundary ohne externe Bibliothek</figcaption><pre><code>export type User = {
+  id: string;
+  displayName: string;
+  role: &quot;admin&quot; | &quot;editor&quot; | &quot;viewer&quot;;
+};
+
+function isRecord(value: unknown): value is Record&lt;string, unknown&gt; {
+  return typeof value === &quot;object&quot; &amp;&amp; value !== null &amp;&amp; !Array.isArray(value);
+}
+
+export function parseUser(value: unknown): User {
+  if (!isRecord(value)) {
+    throw new TypeError(&quot;User muss ein Objekt sein&quot;);
+  }
+
+  const { id, displayName, role } = value;
+  if (typeof id !== &quot;string&quot; || id.length === 0) {
+    throw new TypeError(&quot;User.id muss ein nicht leerer String sein&quot;);
+  }
+  if (typeof displayName !== &quot;string&quot;) {
+    throw new TypeError(&quot;User.displayName muss ein String sein&quot;);
+  }
+  if (role !== &quot;admin&quot; &amp;&amp; role !== &quot;editor&quot; &amp;&amp; role !== &quot;viewer&quot;) {
+    throw new TypeError(&quot;User.role ist unbekannt&quot;);
+  }
+
+  return { id, displayName, role };
+}
+
+export async function getUser(id: string): Promise&lt;User&gt; {
+  const response = await fetch(`/api/users/${encodeURIComponent(id)}`);
+  if (!response.ok) {
+    throw new Error(`User-Request fehlgeschlagen: HTTP ${response.status}`);
+  }
+
+  const raw: unknown = await response.json();
+  return parseUser(raw);
+}</code></pre></figure>
+<p>Die Funktion erlaubt zusätzliche Eingabefelder, gibt sie aber nicht weiter. Das ist eine bewusste Kompatibilitätsentscheidung: Das Backend darf additive Änderungen liefern, während der Client nur sein bekanntes Modell übernimmt. Wer exakte Objekte verlangt, müsste auch unbekannte Schlüssel ablehnen.</p>
+<p>Der Trade-off ist Wartung: Manuelle Validatoren werden bei verschachtelten Modellen schnell repetitiv. Für viele oder komplexe Schemas ist eine etablierte Runtime-Schema-Bibliothek oft angemessener. Sie ändert aber nicht das Prinzip: Die Eingabe bleibt <code>unknown</code>, bis eine Laufzeitprüfung erfolgreich war. Type Predicates können Narrowing kapseln, sind jedoch selbst nur so korrekt wie ihre Implementierung. <a href="#source-predicates">[4]</a></p>
+
+<h2>Diagramm</h2>
+<div class="diagram"><pre class="mermaid">flowchart TD
+  A[HTTP response] --&gt; B[JSON parser]
+  B --&gt; C[unknown]
+  C --&gt; D{Boundary validator}
+  D --&gt;|valid| E[User]
+  D --&gt;|invalid| F[Schema error]</pre></div>
+<p class="caption">Der JSON-Parser beweist nur gültige JSON-Syntax. Erst der Boundary-Validator entscheidet, ob der Wert dem Domänenvertrag entspricht.</p>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+  <li><strong><code>response.ok</code>:</strong> Ein gültiger Fehlerbody ist noch kein erfolgreicher Request. Prüfe den HTTP-Status separat.</li>
+  <li><strong><code>null</code>:</strong> <code>typeof null</code> ist <code>"object"</code>; ein Objekt-Guard muss <code>null</code> ausdrücklich ausschließen.</li>
+  <li><strong>Semantik:</strong> <code>typeof id === "string"</code> prüft noch nicht, ob der String leer ist oder einem ID-Format entspricht.</li>
+  <li><strong>Fehlerdetails:</strong> In Produktcode können strukturierte Issues mit Pfad und Fehlercode hilfreicher sein als der erste geworfene <code>TypeError</code>.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Kopiere <code>parseUser</code> in ein TypeScript-Projekt und teste sieben Fälle: einen gültigen User, <code>null</code>, ein Array, eine numerische ID, eine unbekannte Rolle, eine leere ID und ein gültiges Objekt mit Zusatzfeld. Erwartung: Nur der gültige User und die additive Variante werden akzeptiert; das Zusatzfeld erscheint nicht im Ergebnis.</p>
+<p>Erweitere danach <code>User.role</code> um <code>"auditor"</code>, ohne den Parser zu ändern. Der Compiler kann diese Diskrepanz nicht automatisch erkennen, weil Parser und Union getrennte Logik enthalten. Das ist der zentrale Trade-off manueller Validierung und ein guter Anlass für einen gezielten Test oder ein gemeinsam abgeleitetes Schema.</p>
+<aside><strong>Prüfstand:</strong> Die Parser-Implementierung wurde unter Node.js 24 mit sieben Laufzeitfällen ausgeführt; alle Erwartungen bestanden. Ein TypeScript-Compiler war in der Ausführungsumgebung nicht verfügbar, daher wird kein bestandener Typecheck behauptet.</aside>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Schema-first APIs</strong> können Laufzeitvalidatoren und Typen aus einer gemeinsamen Quelle ableiten. <strong>Discriminated Unions für API-Ergebnisse</strong> modellieren Erfolg und verschiedene Fehlerkörper. <strong>Branded Types</strong> unterscheiden validierte IDs von beliebigen Strings. <strong>Property-based Tests</strong> prüfen Validatoren mit vielen unerwarteten Eingaben statt nur mit einigen Fixtures.</p>
+
+<h2>Quellen</h2>
+<ol class="sources">
+  <li id="source-assertions"><a href="https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#type-assertions">TypeScript Handbook: Type Assertions</a></li>
+  <li id="source-unknown"><a href="https://www.typescriptlang.org/docs/handbook/2/functions.html#unknown">TypeScript Handbook: unknown</a></li>
+  <li id="source-json"><a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/json">MDN: Response.json()</a></li>
+  <li id="source-predicates"><a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#using-type-predicates">TypeScript Handbook: Using type predicates</a></li>
+  <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+  <li><a href="https://mermaid.js.org/intro/">Mermaid: offizielle CDN-Einbindung</a></li>
+</ol>
+
+<footer><hr>
+<p><strong>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei):</strong> 2026-10-05 | Eine Typangabe validiert keine API-Antwort | API-Modellierung | Tief</p>
+<p><strong>Bereich-Rotation:</strong> heute API-Modellierung → morgen z. B. React-Render-Verhalten</p>
+<p><strong>Unsicher geblieben:</strong> Typecheck in der Ausführungsumgebung nicht ausgeführt.</p>
+</footer>
+</article></main><script type="module">
+try {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default'});
+  await mermaid.run({querySelector:'.mermaid'});
+} catch { /* Definition und Erklärung bleiben ohne CDN lesbar. */ }
+</script></body></html>
