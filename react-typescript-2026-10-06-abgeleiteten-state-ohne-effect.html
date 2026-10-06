@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Warum synchron abgeleitete Werte in React in den Renderpfad gehören und nicht per Effect in State kopiert werden sollten."><title>Abgeleitete Werte gehören in den Renderpfad</title><style>
+:root{color-scheme:light dark;--bg:#fff;--ink:#242424;--muted:#686868;--line:#dededb;--soft:#f6f6f3;--accent:#236a49}
+@media(prefers-color-scheme:dark){:root{--bg:#171a19;--ink:#e6e8e4;--muted:#b0b8af;--line:#3b433d;--soft:#222824;--accent:#91cfaa}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:20px/1.7 Georgia,'Times New Roman',serif}nav{border-bottom:1px solid var(--line);padding:18px 5%;font:600 13px system-ui;letter-spacing:.08em}nav a{text-decoration:none;color:var(--ink)}
+main{max-width:800px;margin:60px auto 80px;padding:0 28px}h1,h2,.subtitle,.meta,.eyebrow,figcaption,.caption,.sources,footer{font-family:system-ui,-apple-system,'Segoe UI',sans-serif}h1{font-size:clamp(36px,6vw,52px);line-height:1.12;letter-spacing:-.04em;margin:14px 0 20px}h2{font-size:27px;line-height:1.3;letter-spacing:-.025em;margin:44px 0 18px}
+.eyebrow{font-size:12px;letter-spacing:.13em;color:var(--accent)}.subtitle{font-size:23px;line-height:1.5;color:var(--muted);margin:18px 0}.meta{font-size:13px;color:var(--muted);padding-bottom:25px;border-bottom:1px solid var(--line);line-height:1.65}p{margin:22px 0}a{color:var(--accent);text-underline-offset:3px}code{font:.8em ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--soft);padding:2px 4px;border-radius:3px}
+figure{margin:26px 0}figcaption{color:var(--muted);font-size:12px;margin-bottom:8px}pre{background:var(--soft);padding:22px;border:1px solid var(--line);border-radius:5px;overflow:auto;font:14px/1.7 ui-monospace,Consolas,monospace}pre code{font:inherit;background:none;padding:0;white-space:pre}.diagram{border:1px solid var(--line);padding:20px;border-radius:5px;overflow:auto}.diagram pre{border:0;margin:0}.diagram svg{max-width:100%;height:auto}.caption{font-size:14px;color:var(--muted);line-height:1.6}li{margin:14px 0}.sources,footer{font-size:14px;line-height:1.65;color:var(--muted)}.sources{padding-left:22px}footer{margin-top:38px}hr{border:0;border-top:1px solid var(--line)}
+@media(max-width:600px){main{margin-top:32px;padding:0 20px}body{font-size:18px}.subtitle{font-size:20px}h2{font-size:24px}pre{padding:16px;font-size:12px}.diagram{padding:10px}}@media print{body{font-size:11pt}nav{display:none}main{max-width:none;margin:0}h1{font-size:28pt}h2{break-after:avoid}pre,pre code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt}}
+</style></head><body><nav><a href="index.html">TECH-ARTIKEL / TYPESCRIPT &amp; REACT</a></nav><main><article>
+<header>
+<p class="eyebrow">REACT / RENDER-VERHALTEN</p>
+<h1>Abgeleitete Werte gehören in den Renderpfad</h1>
+<p class="subtitle">Ein Effect, der gefilterte Daten in State kopiert, erzeugt eine zweite Wahrheit. Direkte Ableitung hält Eingaben und Ausgabe im selben Render konsistent.</p>
+<p class="meta">06.10.2026 · React-Render-Verhalten · React 19.3 · Tief · ~8 min</p>
+</header>
+<p>Die Suche zeigt schon den neuen Text, die Ergebnisliste aber noch die Treffer der vorherigen Eingabe. Einen Moment später springt sie um. Bei schnellem Tippen wirkt die Oberfläche, als würde sie hinterherlaufen.</p>
+<p>Oft steckt kein langsamer Filter dahinter. Die Komponente speichert lediglich etwas, das sie bereits aus <code>users</code>, <code>query</code> und <code>direction</code> berechnen könnte. Ein Effect aktualisiert diese Kopie erst nach dem Commit.</p>
+
+<h2>TL;DR</h2>
+<p>Wenn ein Wert vollständig aus aktuellen Props und aktuellem State entsteht, berechne ihn während des Renderns. Speichere nur die minimalen unabhängigen Eingaben. Nutze <code>useMemo</code> erst als gemessene Optimierung – nicht, um die Korrektheit der Ableitung herzustellen.</p>
+
+<h2>Prerequisites</h2>
+<p>Du solltest den React-Ablauf aus <a href="https://react.dev/learn/render-and-commit">Render und Commit</a>, den Zweck von <a href="https://react.dev/reference/react/useEffect"><code>useEffect</code></a> und die Semantik von <a href="https://react.dev/reference/react/useMemo"><code>useMemo</code></a> kennen. Die Beispiele orientieren sich an der aktuellen React-19.3-Dokumentation.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>State ist nicht einfach ein bequemer Ablageort. Er ist eine eigenständige Information, die sich über Zeit verändern kann. Speichert eine Komponente zusätzlich eine berechenbare Kopie, muss sie fortan zwei Wahrheiten synchron halten.</p>
+<p>Der Renderpfad besitzt bereits den aktuellen Snapshot aller Props und State-Werte. Eine reine Funktion kann daraus unmittelbar die sichtbare Liste erzeugen. React empfiehlt ausdrücklich, Transformationen für die Darstellung auf Komponentenebene zu berechnen; ein Effect mit anschließendem State-Update startet den Ablauf erneut. <a href="#source-no-effect">[1]</a></p>
+
+<h2>So macht man es falsch</h2>
+<p>Diese Variante ist in echten Such- und Tabellenkomponenten verlockend: Der Effect „reagiert“ auf jede relevante Eingabe und schreibt das Ergebnis in einen separaten State.</p>
+<figure><figcaption>Fehlervariante · abgeleitete Liste als eigener State</figcaption><pre><code>import { useEffect, useState } from &quot;react&quot;;
+import { deriveVisibleUsers } from &quot;./user-list&quot;;
+import type { SortDirection, User } from &quot;./user-list&quot;;
+
+type Props = { users: readonly User[] };
+
+export function UserDirectory({ users }: Props) {
+  const [query, setQuery] = useState(&quot;&quot;);
+  const [direction, setDirection] = useState&lt;SortDirection&gt;(&quot;asc&quot;);
+  const [visibleUsers, setVisibleUsers] = useState&lt;User[]&gt;([]);
+
+  useEffect(() =&gt; {
+    setVisibleUsers(deriveVisibleUsers(users, query, direction));
+  }, [users, query, direction]);
+
+  // Eingabe und Liste verwenden query bzw. visibleUsers ...
+}</code></pre></figure>
+<p>Selbst mit vollständiger Dependency-Liste bleibt das Grundproblem bestehen. Fehlt später eine Dependency, wird daraus zusätzlich ein Stale-Data-Bug. Ist <code>users</code> bei jedem Parent-Render eine neue Array-Referenz, läuft der Effect auch bei inhaltlich unveränderten Daten erneut.</p>
+
+<h2>Warum ist das falsch?</h2>
+<p>Nach einer Eingabe rendert React zunächst mit dem neuen <code>query</code>, aber dem bisherigen <code>visibleUsers</code>. Erst nach dem Commit läuft der Effect. Dessen <code>setVisibleUsers</code> fordert einen zweiten Render an. React dokumentiert genau diesen kaskadierenden Ablauf für unnötige Effects. <a href="#source-no-effect">[1]</a></p>
+<p>Das ist mehr als ein Performance-Thema: Innerhalb des ersten Render-Snapshots widersprechen sich Suchfeld und Liste. Tests müssen Zwischenzustände berücksichtigen, und Server Rendering kann den Effect überhaupt nicht ausführen. Effects sind für die Synchronisierung mit externen Systemen gedacht, etwa Browser-APIs, Netzwerkverbindungen oder fremde Widgets. <a href="#source-effect">[2]</a></p>
+
+<h2>So macht man es richtig</h2>
+<p>Extrahiere zuerst eine reine Ableitungsfunktion. <code>filter</code> erzeugt ein neues Array; <code>sort</code> mutiert nur dieses neue Array, nicht die Prop-Eingabe.</p>
+<figure><figcaption>user-list.ts · reine, separat testbare Ableitung</figcaption><pre><code>export type User = {
+  id: string;
+  displayName: string;
+  active: boolean;
+};
+
+export type SortDirection = &quot;asc&quot; | &quot;desc&quot;;
+
+export function deriveVisibleUsers(
+  users: readonly User[],
+  query: string,
+  direction: SortDirection,
+): User[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase(&quot;de&quot;);
+  const factor = direction === &quot;asc&quot; ? 1 : -1;
+
+  return users
+    .filter(user =&gt;
+      user.active &amp;&amp;
+      user.displayName.toLocaleLowerCase(&quot;de&quot;).includes(normalizedQuery),
+    )
+    .sort((left, right) =&gt;
+      factor * left.displayName.localeCompare(right.displayName, &quot;de&quot;),
+    );
+}</code></pre></figure>
+<p>Die Komponente speichert nur Suchtext und Sortierrichtung. Die sichtbare Liste entsteht im selben Render:</p>
+<figure><figcaption>UserDirectory.tsx · vollständige Komponente ohne Synchronisations-Effect</figcaption><pre><code>import { useState } from &quot;react&quot;;
+import { deriveVisibleUsers } from &quot;./user-list&quot;;
+import type { SortDirection, User } from &quot;./user-list&quot;;
+
+type Props = { users: readonly User[] };
+
+export function UserDirectory({ users }: Props) {
+  const [query, setQuery] = useState(&quot;&quot;);
+  const [direction, setDirection] = useState&lt;SortDirection&gt;(&quot;asc&quot;);
+
+  const visibleUsers = deriveVisibleUsers(users, query, direction);
+
+  return (
+    &lt;section&gt;
+      &lt;label&gt;
+        Benutzer suchen
+        &lt;input
+          value={query}
+          onChange={event =&gt; setQuery(event.target.value)}
+        /&gt;
+      &lt;/label&gt;
+      &lt;button
+        type=&quot;button&quot;
+        onClick={() =&gt; setDirection(current =&gt;
+          current === &quot;asc&quot; ? &quot;desc&quot; : &quot;asc&quot;)}
+      &gt;
+        Sortierung: {direction === &quot;asc&quot; ? &quot;A–Z&quot; : &quot;Z–A&quot;}
+      &lt;/button&gt;
+      &lt;ul&gt;
+        {visibleUsers.map(user =&gt; &lt;li key={user.id}&gt;{user.displayName}&lt;/li&gt;)}
+      &lt;/ul&gt;
+    &lt;/section&gt;
+  );
+}</code></pre></figure>
+<p>Diese Version berechnet bei jedem Render neu. Das ist zunächst die richtige Semantik. Rendering soll eine reine Berechnung sein: gleiche Eingaben, gleiche Ausgabe, ohne fremde Objekte zu verändern. <a href="#source-render">[3]</a></p>
+<p>Ist die Ableitung nach Messung relevant teuer und ändern sich ihre Eingaben selten, kannst du genau die Zeile mit <code>useMemo(() =&gt; deriveVisibleUsers(...), [users, query, direction])</code> umschließen. Der Trade-off sind Dependency-Pflege und zusätzlicher Code. React beschreibt <code>useMemo</code> ausschließlich als Performanceoptimierung; die Komponente muss auch ohne Cache korrekt funktionieren. <a href="#source-memo">[4]</a></p>
+
+<h2>Diagramm</h2>
+<div class="diagram"><pre class="mermaid">flowchart TD
+  A[Props oder State ändern] --&gt; B[Render mit alter Ableitung]
+  B --&gt; C[Commit]
+  C --&gt; D[Effect berechnet]
+  D --&gt; E[setState]
+  E --&gt; F[Zweiter Render]
+  A -. direkt ableiten .-&gt; G[Render mit aktuellem Wert]
+  G --&gt; H[Commit]</pre></div>
+<p class="caption">Oben: Effect-basierte Synchronisierung committed zunächst eine veraltete Ableitung und fordert danach einen zweiten Render an. Unten: direkte Ableitung erzeugt den aktuellen Wert im ersten Render.</p>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li><strong>Mutation:</strong> Sortiere keine Prop-Arrays direkt. Kopiere sie oder sortiere ein bereits neu erzeugtes Array.</li>
+<li><strong>Referenzidentität:</strong> Eine bei jedem Render neue Ergebnisliste kann memoized Child-Komponenten neu rendern lassen. Das ist ein möglicher Grund für gemessenes <code>useMemo</code>, nicht für abgeleiteten State.</li>
+<li><strong>Echte Synchronisierung:</strong> Muss das Ergebnis in URL, Local Storage oder ein fremdes Widget geschrieben werden, existiert ein externes System; dafür kann ein Effect sinnvoll sein.</li>
+<li><strong>Serverdaten:</strong> Lokales Filtern ist keine Alternative zu serverseitiger Pagination oder Suche, wenn der Client gar nicht den vollständigen Datensatz besitzt.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Baue beide Varianten in einer kleinen React-Komponente nach und setze je einen <code>console.count</code> in den Komponentenrumpf und in den Effect. Tippe drei Zeichen in das Suchfeld. Beobachte in der Effect-Variante zusätzliche Renderdurchläufe und kurzfristig unterschiedliche Snapshots.</p>
+<p>Teste danach <code>deriveVisibleUsers</code> separat: aktive Benutzer filtern, auf- und absteigend sortieren und prüfen, dass das Eingabearray unverändert bleibt. Für den Artikel liefen vier solche Prüfungen unter Node.js 24 erfolgreich. Ein TypeScript-Compiler und React-Runtime-Test standen nicht zur Verfügung; ein bestandener TSX-Typecheck wird daher nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>State-Minimierung</strong> reduziert widersprüchliche Wahrheiten. <strong>Referenzstabilität</strong> erklärt, wann Memoization über Komponentengrenzen wirkt. <strong>React Profiler</strong> liefert Messdaten vor einer Optimierung. <strong>Server State</strong> trennt entfernte Daten von lokalem UI-State. <strong>Keys</strong> setzen State gezielt zurück, wenn sich die Identität einer Ansicht ändert.</p>
+
+<h2>Quellen</h2>
+<ol class="sources">
+<li id="source-no-effect"><a href="https://react.dev/learn/you-might-not-need-an-effect">React 19.3: You Might Not Need an Effect</a></li>
+<li id="source-effect"><a href="https://react.dev/reference/react/useEffect">React 19.3: useEffect</a></li>
+<li id="source-render"><a href="https://react.dev/learn/render-and-commit">React 19.3: Render and Commit</a></li>
+<li id="source-memo"><a href="https://react.dev/reference/react/useMemo">React 19.3: useMemo</a></li>
+<li><a href="https://mermaid.js.org/intro/">Mermaid: offizielle CDN-Einbindung</a></li>
+</ol>
+
+<footer><hr>
+<p><strong>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei):</strong> 2026-10-06 | Abgeleitete Werte gehören in den Renderpfad | React-Render-Verhalten | Tief</p>
+<p><strong>Bereich-Rotation:</strong> heute React-Render-Verhalten → morgen z. B. TypeScript-Typsystem</p>
+<p><strong>Unsicher geblieben:</strong> TSX-Typecheck und React-Runtime-Test in der Ausführungsumgebung nicht ausgeführt.</p>
+</footer>
+</article></main><script type="module">
+try {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default'});
+  await mermaid.run({querySelector:'.mermaid'});
+} catch { /* Definition und Erklärung bleiben ohne CDN lesbar. */ }
+</script></body></html>
