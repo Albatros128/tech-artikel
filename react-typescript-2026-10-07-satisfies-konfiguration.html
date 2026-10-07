@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Warum TypeScripts satisfies-Operator Konfigurationen prüft, ohne ihre präzise Inferenz zu verlieren.">
+  <title>satisfies prüft Konfiguration, ohne ihre Inferenz zu verschlucken</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f7f7f5; --paper:#fff; --text:#242424; --muted:#6b6b6b; --line:#deded8; --accent:#2457c5; --code:#f1f3f5; --note:#eef4ff; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#101214; --paper:#17191c; --text:#ececea; --muted:#a9aaad; --line:#34373b; --accent:#8eb0ff; --code:#202328; --note:#19253a; } }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:18px/1.72 Georgia, "Times New Roman", serif; }
+    article { width:min(760px, calc(100% - 32px)); margin:0 auto; padding:72px 0 48px; }
+    h1,h2 { font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.16; letter-spacing:-.025em; }
+    h1 { margin:0 0 18px; font-size:clamp(2.35rem,7vw,4.3rem); }
+    h2 { margin:2.8rem 0 .8rem; font-size:1.55rem; }
+    .subtitle { font-size:1.28rem; color:var(--muted); line-height:1.5; }
+    .meta { margin:24px 0 44px; color:var(--muted); font: .92rem/1.5 system-ui,sans-serif; }
+    p { margin:0 0 1.25rem; }
+    a { color:var(--accent); text-underline-offset:.16em; }
+    code { font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace; font-size:.88em; }
+    :not(pre) > code { padding:.12em .32em; background:var(--code); border-radius:4px; }
+    pre { overflow:auto; padding:20px; border:1px solid var(--line); border-radius:10px; background:var(--code); font:15px/1.55 "SFMono-Regular",Consolas,"Liberation Mono",monospace; }
+    .note { padding:18px 20px; border-left:4px solid var(--accent); background:var(--note); }
+    ul { padding-left:1.25rem; }
+    li { margin:.55rem 0; }
+    .diagram { margin:28px 0; padding:22px; overflow:auto; border:1px solid var(--line); border-radius:10px; background:var(--paper); }
+    .fallback { color:var(--muted); font: .9rem/1.5 system-ui,sans-serif; }
+    hr { margin:3.5rem 0 1.25rem; border:0; border-top:1px solid var(--line); }
+    footer { color:var(--muted); font: .9rem/1.55 system-ui,sans-serif; }
+    footer p { margin:.35rem 0; }
+    @media (max-width:600px) { article{padding-top:42px} pre{margin-left:-8px;margin-right:-8px} }
+  </style>
+</head>
+<body>
+<article>
+  <header>
+    <h1><code>satisfies</code> prüft Konfiguration, ohne ihre Inferenz zu verschlucken</h1>
+    <p class="subtitle">Eine breite Typannotation macht ein Objekt sicher, aber häufig unpräzise. Der bessere Vertrag prüft die Form und lässt den konkreten Wert trotzdem sichtbar.</p>
+    <p class="meta">TypeScript-Typsystem · TypeScript 6.0 (<code>satisfies</code> seit 4.9) · Tief · ~8 min</p>
+  </header>
+
+  <p>Dein Frontend kennt drei Umgebungen. Lokal liefert ein Mock Transport Daten aus Fixtures, Staging und Produktion sprechen HTTP. Die Konfiguration sieht harmlos aus – bis Code, der ausdrücklich die lokale Konfiguration verwendet, nicht mehr auf <code>fixtures</code> zugreifen darf. Der Compiler kennt nur noch die breite Union. Du hast Sicherheit gewonnen und Wissen verloren.</p>
+
+  <h2>TL;DR</h2>
+  <p>Annotiere eine konkrete Konstante nicht vorschnell mit ihrem Obertyp. Schreibe das Objekt normal hin und hänge <code>satisfies AppConfig</code> an. TypeScript prüft dann, ob der Ausdruck zum Vertrag passt, behält aber den präziseren abgeleiteten Typ des Ausdrucks. Das ist ideal für statische Konfigurationen. Es ersetzt weder Runtime-Validierung noch eine bewusste Abstraktionsgrenze.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest Union Types und Narrowing kennen. Hilfreich sind außerdem <a href="https://www.typescriptlang.org/docs/handbook/2/keyof-types.html">das <code>keyof</code>-Kapitel</a> und <a href="https://www.typescriptlang.org/docs/handbook/2/indexed-access-types.html">Indexed Access Types</a>. Die maßgebliche Beschreibung von <code>satisfies</code> steht in den <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-4-9.html#the-satisfies-operator">TypeScript-4.9-Release-Notes</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Eine Annotation beantwortet: „Welchen Typ soll diese Variable haben?“ <code>satisfies</code> beantwortet dagegen: „Erfüllt dieser Ausdruck mindestens diesen Vertrag?“ Diese Fragen sind ähnlich, aber nicht gleich. Im zweiten Fall bleibt die konkrete Struktur verfügbar: TypeScript weiß weiterhin, dass <code>development</code> ein Mock mit <code>fixtures</code> ist und <code>production</code> HTTP mit <code>baseUrl</code>.</p>
+
+  <h2>So macht man es falsch</h2>
+  <p>Die folgende Annotation ist korrekt und keineswegs exotisch. Problematisch wird sie, wenn nachgelagerter Code Details einzelner Einträge benötigt:</p>
+  <pre><code>// config.ts – kompiliert, verliert aber Präzision
+type Environment = "development" | "staging" | "production";
+type TransportConfig =
+  | { kind: "mock"; fixtures: readonly string[] }
+  | { kind: "http"; baseUrl: string };
+type AppConfig = Record&lt;Environment, TransportConfig&gt;;
+
+export const appConfig: AppConfig = {
+  development: { kind: "mock", fixtures: ["users", "orders"] },
+  staging: { kind: "http", baseUrl: "https://staging.api.example.test" },
+  production: { kind: "http", baseUrl: "https://api.example.test" }
+};
+
+appConfig.development.fixtures;
+// Fehler: "fixtures" existiert nicht auf jedem TransportConfig.</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Die explizite Annotation setzt den Variablentyp auf <code>AppConfig</code>. Damit ist jeder Wert im Record die gesamte Union <code>TransportConfig</code>. Das ist an einer echten Abstraktionsgrenze sinnvoll: Eine Funktion, die eine beliebige Umgebung erhält, muss über <code>kind</code> verengen. Für eine bekannte Eigenschaft ist es jedoch unnötig grob.</p>
+  <p>Ein Type Assertion wie <code>as AppConfig</code> löst das nicht. Es weist dem Ergebnis ebenfalls den breiten Typ zu und formuliert zudem eher eine Behauptung als eine Prüfung. Beobachtbar wird der Unterschied im Editor: Autovervollständigung verliert konkrete Felder, und Zugriffe brauchen Narrowing, obwohl der Schlüssel bereits feststeht.</p>
+
+  <h2>So macht man es richtig – mit Trade-offs</h2>
+  <p>Die Konfiguration darf ihren eigenen Typ behalten; <code>satisfies</code> kontrolliert nur die Zuweisungskompatibilität. <code>as const</code> hält zusätzlich Schlüsselwerte und Arrays readonly und literalgenau:</p>
+  <pre><code>// config.ts – vollständiges, eigenständiges TypeScript-Modul
+type Environment = "development" | "staging" | "production";
+type TransportConfig =
+  | { kind: "mock"; fixtures: readonly string[] }
+  | { kind: "http"; baseUrl: string };
+type AppConfig = Record&lt;Environment, TransportConfig&gt;;
+
+export const appConfig = {
+  development: { kind: "mock", fixtures: ["users", "orders"] },
+  staging: { kind: "http", baseUrl: "https://staging.api.example.test" },
+  production: { kind: "http", baseUrl: "https://api.example.test" }
+} as const satisfies AppConfig;
+
+export type ConfiguredEnvironment = keyof typeof appConfig;
+
+export function describeTransport(env: ConfiguredEnvironment): string {
+  const config = appConfig[env];
+  return config.kind === "mock"
+    ? `fixtures:${config.fixtures.join(",")}`
+    : config.baseUrl;
+}
+
+appConfig.development.fixtures; // readonly ["users", "orders"]</code></pre>
+  <p>Ein fehlendes <code>production</code>, ein Tippfehler im Schlüssel oder ein falsches Feld wird weiter abgelehnt. Der Trade-off: Konsumenten können sich nun an konkrete Einträge koppeln. Soll ein Modul absichtlich nur den abstrakten Vertrag sehen, exportiere eine Getter-Funktion mit Rückgabetyp <code>TransportConfig</code> oder annotiere an dieser Grenze bewusst breit. Für JSON, Umgebungsvariablen oder API-Daten brauchst du zusätzlich Runtime-Validierung; <code>satisfies</code> existiert nach dem Kompilieren nicht mehr.</p>
+
+  <h2>Diagramm</h2>
+  <div class="diagram">
+    <pre class="mermaid">flowchart TD
+      A[Objektliteral] --> B{Vertrag erfüllt?}
+      B -->|Annotation| C[Variable ist AppConfig]
+      B -->|satisfies| D[Variablentyp bleibt präzise]
+      C --> E[Narrowing für konkrete Felder]
+      D --> F[Konkrete Felder direkt bekannt]</pre>
+    <p class="fallback">Textuelle Erklärung: Beide Wege prüfen gegen <code>AppConfig</code>. Die Annotation ersetzt anschließend den Typ der Variable; <code>satisfies</code> bewahrt den abgeleiteten Typ des Objektliterals.</p>
+  </div>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>satisfies</code> transformiert keinen Wert und ergänzt keine Defaults.</li>
+    <li>Ohne <code>as const</code> können Literalwerte weiterhin zu <code>string</code> oder <code>number</code> verbreitert werden.</li>
+    <li>Zu konkrete exportierte Typen können Refactorings erschweren; abstrahiere dort, wo Austauschbarkeit Teil der API ist.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Kopiere das Modul in den TypeScript Playground. Entferne zuerst <code>satisfies AppConfig</code> und schreibe stattdessen <code>: AppConfig</code> hinter <code>appConfig</code>: Der Zugriff auf <code>development.fixtures</code> scheitert. Stelle danach <code>satisfies</code> wieder her und vertippe <code>production</code>. Erwartung: Der erste Versuch verliert Präzision; der zweite bewahrt sie und meldet trotzdem den falschen Schlüssel. Das dauert etwa zehn Minuten und macht den Unterschied im Editor unmittelbar sichtbar.</p>
+
+  <h2>Verwandte Themen</h2>
+  <p><a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions">Discriminated Unions</a> erklären das sichere Verengen innerhalb des Getters. <a href="https://www.typescriptlang.org/docs/handbook/2/mapped-types.html">Mapped Types</a> zeigen, wie solche vollständigen Konfigurationsverträge entstehen. <a href="https://www.typescriptlang.org/docs/handbook/2/generics.html">Generics</a> helfen, die Schlüssel-Wert-Beziehung in Hilfsfunktionen zu erhalten. Für externe Daten schließt Runtime-Schema-Validierung die Lücke zwischen statischem Vertrag und tatsächlichem Wert.</p>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-4-9.html#the-satisfies-operator">TypeScript 4.9: The <code>satisfies</code> Operator</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#literal-types">TypeScript Handbook: Literal Types</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/keyof-types.html">TypeScript Handbook: Keyof Type Operator</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/indexed-access-types.html">TypeScript Handbook: Indexed Access Types</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage</a></li>
+  </ul>
+
+  <hr>
+  <footer>
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 07.10.2026 | <code>satisfies</code> prüft Konfiguration, ohne ihre Inferenz zu verschlucken | TypeScript-Typsystem | Tief;</p>
+    <p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. verbindendes Thema;</p>
+    <p>Unsicher geblieben: nichts.</p>
+  </footer>
+</article>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "strict" });
+</script>
+</body>
+</html>
