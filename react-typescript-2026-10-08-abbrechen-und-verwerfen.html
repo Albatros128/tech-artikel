@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Warum React-Datenzugriff sowohl AbortController als auch eine explizite Relevanzregel braucht.">
+  <title>Abbrechen ist nicht dasselbe wie Verwerfen</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f7f7f5; --paper:#fff; --text:#242424; --muted:#6b6b6b; --line:#deded8; --accent:#2457c5; --code:#f1f3f5; --note:#eef4ff; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#101214; --paper:#17191c; --text:#ececea; --muted:#a9aaad; --line:#34373b; --accent:#8eb0ff; --code:#202328; --note:#19253a; } }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:18px/1.72 Georgia,"Times New Roman",serif; }
+    article { width:min(760px,calc(100% - 32px)); margin:0 auto; padding:72px 0 48px; }
+    h1,h2 { font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.16; letter-spacing:-.025em; }
+    h1 { margin:0 0 18px; font-size:clamp(2.45rem,7vw,4.5rem); }
+    h2 { margin:2.8rem 0 .8rem; font-size:1.55rem; }
+    .subtitle { font-size:1.28rem; color:var(--muted); line-height:1.5; }
+    .meta { margin:24px 0 44px; color:var(--muted); font:.92rem/1.5 system-ui,sans-serif; }
+    p { margin:0 0 1.25rem; }
+    a { color:var(--accent); text-underline-offset:.16em; }
+    code { font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace; font-size:.88em; }
+    :not(pre)>code { padding:.12em .32em; background:var(--code); border-radius:4px; }
+    pre { overflow:auto; padding:20px; border:1px solid var(--line); border-radius:10px; background:var(--code); font:15px/1.55 "SFMono-Regular",Consolas,"Liberation Mono",monospace; }
+    .note { padding:18px 20px; border-left:4px solid var(--accent); background:var(--note); }
+    ul { padding-left:1.25rem; } li { margin:.55rem 0; }
+    .diagram { margin:28px 0; padding:22px; overflow:auto; border:1px solid var(--line); border-radius:10px; background:var(--paper); }
+    .fallback { color:var(--muted); font:.9rem/1.5 system-ui,sans-serif; }
+    hr { margin:3.5rem 0 1.25rem; border:0; border-top:1px solid var(--line); }
+    footer { color:var(--muted); font:.9rem/1.55 system-ui,sans-serif; } footer p { margin:.35rem 0; }
+    @media (max-width:600px) { article{padding-top:42px} pre{margin-left:-8px;margin-right:-8px} }
+  </style>
+</head>
+<body>
+<article>
+  <header>
+    <h1>Abbrechen ist nicht dasselbe wie Verwerfen</h1>
+    <p class="subtitle">Bei schnellem Filterwechsel muss React nicht nur alte Requests stoppen. Es braucht eine ausdrückliche Regel, welcher Request den sichtbaren Zustand noch verändern darf.</p>
+    <p class="meta">Datenzugriff · React 19.3 + TypeScript · Tief · ~9 min</p>
+  </header>
+
+  <p>Eine Suche lädt „Berlin“. Noch bevor die Antwort eintrifft, wählt der Nutzer „Darmstadt“. Der zweite Request ist schnell, die richtige Liste erscheint – und wird kurz darauf von der verspäteten Berlin-Antwort überschrieben. Kein Hook ist „stale“, kein Dependency-Array fehlt. Das Problem ist simpler: Netzwerkantworten halten sich nicht an die Reihenfolge ihrer Requests.</p>
+
+  <h2>TL;DR</h2>
+  <p>Modelliere bei manuellen Requests im Effect zwei getrennte Verantwortungen: <code>AbortController</code> beendet nach Möglichkeit unnötige Arbeit; ein Effect-lokales <code>active</code>-Flag verhindert, dass ein nicht mehr relevanter asynchroner Ablauf State schreibt. Erst zusammen drücken sie die fachliche Regel „latest request wins“ aus. Bei komplexerem Datenzugriff ist ein Router-Loader oder eine Cache-Bibliothek meist die bessere Abstraktion.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Vorausgesetzt sind <a href="https://react.dev/reference/react/useEffect">Effects und ihre Cleanup-Funktion</a>, Promise-Fehlerbehandlung sowie <a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortController"><code>AbortController</code></a>. Die React-Dokumentation beschreibt Effects als Synchronisierung mit externen Systemen und führt für manuelles Fetching ausdrücklich einen Schutz gegen falsch sortierte Antworten vor.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Cancellation und Relevanz sind verschiedene Dinge. Cancellation fragt: „Kann diese Arbeit gestoppt werden?“ Relevanz fragt: „Darf ihr Ergebnis noch in die UI?“ Ein Fetch kann bereits aufgelöst sein, während danach noch JSON dekodiert, validiert oder transformiert wird. Außerdem respektiert nicht jede Promise-basierte API ein <code>AbortSignal</code>. Deshalb ist Abbrechen eine Ressourcenoptimierung; die Commit-Regel ist die eigentliche Korrektheitsgarantie.</p>
+
+  <h2>So macht man es falsch</h2>
+  <p>Diese Variante ist realistisch: Sie setzt einen Ladezustand, behandelt HTTP-Fehler und besitzt vollständige Dependencies. Trotzdem kann ein älterer Request den neueren Zustand überschreiben.</p>
+  <pre><code>// UserSearch.tsx – fehlerhafter Ausschnitt
+import { useEffect, useState } from "react";
+
+type User = { id: string; name: string };
+
+export function UserSearch({ city }: { city: string }) {
+  const [users, setUsers] = useState&lt;User[]&gt;([]);
+  const [error, setError] = useState&lt;string | null&gt;(null);
+
+  useEffect(() =&gt; {
+    setError(null);
+    fetch(`/api/users?city=${encodeURIComponent(city)}`)
+      .then(response =&gt; {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise&lt;User[]&gt;;
+      })
+      .then(setUsers)
+      .catch(error =&gt; setError(String(error)));
+  }, [city]);
+
+  // Rendering gekürzt
+  return &lt;p&gt;{error ?? `${users.length} Treffer`}&lt;/p&gt;;
+}</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Jeder Effect-Durchlauf erzeugt eine eigene Closure mit seinem <code>city</code>-Wert. React räumt den alten Effect vor dem nächsten Setup auf, aber ohne Cleanup gibt es nichts zu stoppen oder zu entwerten. Beide Promise-Ketten dürfen später <code>setUsers</code> aufrufen. React kennt ihre fachliche Reihenfolge nicht; „zuletzt gestartet“ ist keine eingebaute State-Update-Priorität.</p>
+  <p>Unter künstlich gleichmäßiger Latenz bleibt der Fehler unsichtbar. Beobachtbar wird er bei schnellem Wechsel, schwankender Verbindung oder unterschiedlich teuren Serverabfragen: Filter und Ergebnis passen nicht zusammen. Das ist ein Korrektheitsproblem, keine pauschale Performancebehauptung.</p>
+
+  <h2>So macht man es richtig mit Trade-offs</h2>
+  <p>Der Effect besitzt genau einen Request. Sein Cleanup entzieht diesem Request die Schreibberechtigung und sendet zusätzlich das Abort-Signal:</p>
+  <pre><code>// UserSearch.tsx – vollständiger relevanter Ausschnitt
+import { useEffect, useState } from "react";
+
+type User = { id: string; name: string };
+type SearchState =
+  | { status: "loading"; city: string }
+  | { status: "success"; city: string; users: User[] }
+  | { status: "error"; city: string; message: string };
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException &amp;&amp; error.name === "AbortError";
+}
+
+export function UserSearch({ city }: { city: string }) {
+  const [state, setState] = useState&lt;SearchState&gt;({ status: "loading", city });
+
+  useEffect(() =&gt; {
+    const controller = new AbortController();
+    let active = true;
+    setState({ status: "loading", city });
+
+    void (async () =&gt; {
+      try {
+        const response = await fetch(
+          `/api/users?city=${encodeURIComponent(city)}`,
+          { signal: controller.signal }
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const users = await response.json() as User[]; // Boundary-Validierung ergänzen
+        if (active) setState({ status: "success", city, users });
+      } catch (error: unknown) {
+        if (!active || isAbortError(error)) return;
+        setState({ status: "error", city, message: String(error) });
+      }
+    })();
+
+    return () =&gt; {
+      active = false;
+      controller.abort();
+    };
+  }, [city]);
+
+  return &lt;p&gt;{state.status === "success"
+    ? `${state.users.length} Treffer für ${state.city}`
+    : state.status === "error" ? state.message : `Lade ${state.city} …`}&lt;/p&gt;;
+}</code></pre>
+  <p>Laut MDN bricht <code>abort()</code> Fetch, das Lesen des Response-Bodys und Streams ab; das Promise wird typischerweise mit einer <code>AbortError</code>-<code>DOMException</code> abgelehnt. Das lokale Flag bleibt trotzdem die Semantikschicht. Der Preis sind Boilerplate und fehlendes Caching. React empfiehlt für produktionsweiten Datenzugriff Framework-Mechanismen oder einen Client-Cache, weil manuelles Fetching in Effects auch Preloading, Deduplizierung und Server Rendering nicht löst.</p>
+
+  <h2>Diagramm</h2>
+  <div class="diagram">
+    <pre class="mermaid">sequenceDiagram
+      participant UI
+      participant A as Request Berlin
+      participant B as Request Darmstadt
+      UI-&gt;&gt;A: starten
+      UI-&gt;&gt;A: Cleanup: inaktiv + abort
+      UI-&gt;&gt;B: starten
+      B--&gt;&gt;UI: aktuell: State schreiben
+      A--xUI: veraltet: Ergebnis verwerfen</pre>
+    <p class="fallback">Textuelle Erklärung: Der Wechsel nach Darmstadt räumt den Berlin-Effect auf. Der neue Request darf State schreiben; eine verspätete Berlin-Antwort wird unabhängig vom tatsächlichen Abbruch verworfen.</p>
+  </div>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Ein Abort ist kein Benutzerfehler und sollte keine rote Fehlermeldung erzeugen.</li>
+    <li>Ein <code>AbortSignal</code> ist nach dem Abbruch verbraucht; erzeuge pro Effect-Durchlauf einen Controller.</li>
+    <li>Das Beispiel castet JSON nur der Kürze halber. Externe Daten brauchen weiterhin Runtime-Validierung.</li>
+    <li>Mehrere parallele Seiten eines Ergebnisses benötigen eine andere Semantik als „latest wins“.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Verzögere die Berlin-Antwort im Mock um 1500 ms und Darmstadt um 100 ms. Wechsle innerhalb einer halben Sekunde. Ohne Cleanup erscheint zuerst Darmstadt und danach fälschlich Berlin. Ergänze zunächst nur <code>active</code>, danach auch den Controller. Erwartung: Schon das Flag schützt den sichtbaren Zustand; der Controller beendet zusätzlich die nicht mehr benötigte Fetch-Arbeit. Die Übung dauert etwa zehn Minuten.</p>
+
+  <h2>Verwandte Themen</h2>
+  <p><a href="https://react.dev/learn/synchronizing-with-effects">Effect-Lebenszyklen</a> erklären die Setup-Cleanup-Symmetrie. Ein discriminated Union State verhindert widersprüchliche Kombinationen aus Daten, Fehler und Ladeflag. Runtime-Validierung schützt die Netzwerkgrenze. Router-Loader, Suspense-fähige Frameworks und Client-Caches verlagern Request-Koordination, Deduplizierung und Cache-Invalidierung aus einzelnen Komponenten.</p>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://react.dev/reference/react/useEffect#fetching-data-with-effects">React 19.3: Fetching data with Effects</a></li>
+    <li><a href="https://react.dev/learn/synchronizing-with-effects">React: Synchronizing with Effects</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortController">MDN: AbortController</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal#examples">MDN: AbortSignal examples</a></li>
+    <li><a href="https://fetch.spec.whatwg.org/">WHATWG Fetch Standard</a></li>
+  </ul>
+
+  <hr>
+  <footer>
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 08.10.2026 | Abbrechen ist nicht dasselbe wie Verwerfen | Datenzugriff | Tief;</p>
+    <p>Bereich-Rotation: heute Datenzugriff → morgen z. B. React-Komponenten-APIs;</p>
+    <p>Unsicher geblieben: nichts.</p>
+  </footer>
+</article>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad:true, theme:"neutral", securityLevel:"strict" });
+</script>
+</body>
+</html>
