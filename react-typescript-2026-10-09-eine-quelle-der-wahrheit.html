@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Wie kontrollierte und unkontrollierte React-Komponenten mit einer expliziten TypeScript-API genau eine Quelle der Wahrheit behalten.">
+  <title>Eine Komponente braucht genau eine Quelle der Wahrheit</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#deded8;--accent:#2457c5;--code:#f1f3f5;--note:#eef4ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101214;--paper:#17191c;--text:#ececea;--muted:#a9aaad;--line:#34373b;--accent:#8eb0ff;--code:#202328;--note:#19253a}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}
+    article{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 48px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.16;letter-spacing:-.025em}
+    h1{margin:0 0 18px;font-size:clamp(2.4rem,7vw,4.4rem)}h2{margin:2.8rem 0 .8rem;font-size:1.55rem}.subtitle{font-size:1.28rem;color:var(--muted);line-height:1.5}.meta{margin:24px 0 44px;color:var(--muted);font:.92rem/1.5 system-ui,sans-serif}
+    p{margin:0 0 1.25rem}a{color:var(--accent);text-underline-offset:.16em}code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:.88em}:not(pre)>code{padding:.12em .32em;background:var(--code);border-radius:4px}
+    pre{overflow:auto;padding:20px;border:1px solid var(--line);border-radius:10px;background:var(--code);font:15px/1.55 "SFMono-Regular",Consolas,"Liberation Mono",monospace}.note{padding:18px 20px;border-left:4px solid var(--accent);background:var(--note)}ul{padding-left:1.25rem}li{margin:.55rem 0}
+    .diagram{margin:28px 0;padding:22px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--paper)}.fallback{color:var(--muted);font:.9rem/1.5 system-ui,sans-serif}hr{margin:3.5rem 0 1.25rem;border:0;border-top:1px solid var(--line)}footer{color:var(--muted);font:.9rem/1.55 system-ui,sans-serif}footer p{margin:.35rem 0}
+    @media(max-width:600px){article{padding-top:42px}pre{margin-left:-8px;margin-right:-8px}}
+  </style>
+</head>
+<body>
+<article>
+  <header>
+    <h1>Eine Komponente braucht genau eine Quelle der Wahrheit</h1>
+    <p class="subtitle">Eine wiederverwendbare Eingabe darf kontrolliert oder unkontrolliert sein. Wenn ihre API beide Modelle gleichzeitig zulässt, entsteht Synchronisationscode statt Flexibilität.</p>
+    <p class="meta">React-Komponenten-APIs · React 19.3 + TypeScript · Tief · ~8 min</p>
+  </header>
+
+  <p>Ein <code>SearchField</code> startet als kleine Eingabe mit internem State. Später soll ein Filterformular den Wert von außen setzen können. Also kommen <code>value</code>, <code>defaultValue</code> und <code>onValueChange</code> hinzu. Kurz darauf synchronisiert ein Effect Prop und State. Bei einem Reset zeigt die Eingabe für einen Render den alten Wert; bei manchen Aufrufen sind sogar <code>value</code> und <code>defaultValue</code> gesetzt. Die Komponente hat nicht zu wenig State, sondern zwei Besitzer.</p>
+
+  <h2>TL;DR</h2>
+  <p>Entscheide in der öffentlichen API explizit zwischen kontrolliert und unkontrolliert. Im kontrollierten Modus besitzt der Parent den aktuellen Wert; die Komponente meldet nur Änderungen. Im unkontrollierten Modus besitzt die Komponente den Wert; <code>defaultValue</code> initialisiert ihn genau einmal. Eine discriminated Union macht ungültige Prop-Kombinationen unrepräsentierbar. Ein Effect zum Kopieren von <code>value</code> in lokalen State ist dann unnötig.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest <a href="https://react.dev/learn/sharing-state-between-components">State Ownership und Lifting State Up</a>, <a href="https://react.dev/reference/react-dom/components/input#controlling-an-input-with-a-state-variable">kontrollierte Inputs</a> sowie <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions">Discriminated Unions</a> kennen. Die aktuelle React-19.3-Dokumentation hält fest: Ein Input kann nicht gleichzeitig kontrolliert und unkontrolliert sein und darf während seiner Lebenszeit nicht zwischen beiden Modi wechseln.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>„Controlled“ beschreibt nicht, ob ein <code>&lt;input&gt;</code> technisch ein <code>value</code>-Attribut erhält. Es beschreibt, wer die Entscheidung über den aktuellen Wert besitzt. Sobald der Parent Besitzer ist, darf lokaler State keine zweite Wahrheit speichern. <code>onValueChange</code> ist dann ein Vorschlag an den Besitzer, kein interner Schreibbefehl. Das macht Datenfluss und Reset-Verhalten vorhersehbar.</p>
+
+  <h2>So macht man es falsch</h2>
+  <p>Die scheinbar bequeme API erlaubt jede Kombination. Der Effect versucht anschließend, widersprüchliche Verantwortungen zu versöhnen:</p>
+  <pre><code>// SearchField.tsx – problematischer Ausschnitt
+import { useEffect, useState } from "react";
+
+type Props = {
+  value?: string;
+  defaultValue?: string;
+  onValueChange?: (value: string) =&gt; void;
+};
+
+export function SearchField({ value, defaultValue = "", onValueChange }: Props) {
+  const [draft, setDraft] = useState(defaultValue);
+
+  useEffect(() =&gt; {
+    if (value !== undefined) setDraft(value);
+  }, [value]);
+
+  function change(next: string) {
+    setDraft(next);
+    onValueChange?.(next);
+  }
+
+  return &lt;input value={draft} onChange={event =&gt; change(event.target.value)} /&gt;;
+}</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Props werden gerendert, Effects laufen erst nach dem Commit. Ändert der Parent <code>value</code>, rendert die Komponente zunächst mit dem alten <code>draft</code>; erst der Effect plant ein zweites Render. Noch wichtiger: Benutzereingaben verändern immer lokalen State, selbst wenn der Parent den neuen Wert ablehnen, normalisieren oder verzögert übernehmen will. Die Komponente behauptet kontrollierbar zu sein, entscheidet aber weiterhin selbst.</p>
+  <p>Auch die Aufrufseite erhält keine Hilfe. TypeScript akzeptiert <code>value</code> ohne Handler, beide Startwerte zugleich oder einen versehentlichen Moduswechsel. Das sind keine unabhängigen Optionen, sondern alternative Verträge.</p>
+
+  <h2>So macht man es richtig mit Trade-offs</h2>
+  <p>Ein expliziter Diskriminator wirkt etwas ausführlicher, macht dafür Besitz und erlaubte Props eindeutig:</p>
+  <pre><code>// SearchField.tsx – vollständige Komponenten-API
+import { useId, useState } from "react";
+
+type SharedProps = { label: string; name: string };
+type ControlledProps = {
+  mode: "controlled";
+  value: string;
+  onValueChange: (value: string) =&gt; void;
+  defaultValue?: never;
+};
+type UncontrolledProps = {
+  mode: "uncontrolled";
+  defaultValue?: string;
+  onValueChange?: (value: string) =&gt; void;
+  value?: never;
+};
+type SearchFieldProps = SharedProps &amp; (ControlledProps | UncontrolledProps);
+
+export function SearchField(props: SearchFieldProps) {
+  const id = useId();
+  const [draft, setDraft] = useState(() =&gt;
+    props.mode === "uncontrolled" ? props.defaultValue ?? "" : ""
+  );
+  const current = props.mode === "controlled" ? props.value : draft;
+
+  function change(next: string) {
+    if (props.mode === "uncontrolled") setDraft(next);
+    props.onValueChange?.(next);
+  }
+
+  return (
+    &lt;label htmlFor={id}&gt;
+      {props.label}
+      &lt;input id={id} name={props.name} value={current}
+        onChange={event =&gt; change(event.target.value)} /&gt;
+    &lt;/label&gt;
+  );
+}</code></pre>
+  <p>Die zugrunde liegende DOM-Eingabe bleibt in beiden Fällen technisch kontrolliert, weil <code>current</code> immer ein String ist. Der Unterschied liegt in der Besitzgrenze der Komponente. <code>defaultValue</code> wird absichtlich nur beim ersten State-Aufbau gelesen; spätere Änderungen resetten nichts. Für einen Reset kann der Parent die Komponente mit einem neuen <code>key</code> remounten oder den kontrollierten Modus wählen.</p>
+  <p>Der Trade-off ist API-Größe. Für eine ausschließlich formularinterne Eingabe genügt oft nur die unkontrollierte Variante; für Design-Systeme kann der explizite Modus die Klarheit wert sein. Zwei getrennte Komponenten sind eine weitere, noch strengere Alternative. In jedem Fall muss der Modus über die Lebenszeit stabil bleiben.</p>
+
+  <h2>Diagramm</h2>
+  <div class="diagram">
+    <pre class="mermaid">flowchart LR
+      P[Parent-State] -- value --&gt; C[SearchField]
+      C -- onValueChange --&gt; P
+      U[Interner State] -- nur uncontrolled --&gt; C
+      C -- current --&gt; I[DOM-Input]</pre>
+    <p class="fallback">Textuelle Erklärung: Im kontrollierten Modus bildet der Parent mit <code>value</code> und <code>onValueChange</code> den Kreis. Im unkontrollierten Modus speist ausschließlich der interne State den aktuellen Wert. Beide Quellen sind nie gleichzeitig aktiv.</p>
+  </div>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>defaultValue</code> ist ein Initialwert, kein nachträglicher Reset-Kanal.</li>
+    <li>Ein kontrollierter Textwert sollte nie <code>undefined</code> oder <code>null</code> werden.</li>
+    <li>Wechselt <code>mode</code> zur Laufzeit, kann alter interner State sichtbar werden; remounte bewusst oder verbiete den Wechsel organisatorisch.</li>
+    <li>Label und stabile ID gehören zur Komponenten-API, nicht erst zur späteren Accessibility-Reparatur.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Rendere die Komponente zweimal: einmal kontrolliert mit Parent-State, einmal unkontrolliert mit <code>defaultValue="React"</code>. Ändere danach den Default per Button. Erwartung: Das kontrollierte Feld folgt sofort seinem Parent; das unkontrollierte behält seinen aktuellen Entwurf. Versuche anschließend, im kontrollierten Aufruf zusätzlich <code>defaultValue</code> zu setzen. TypeScript soll den ungültigen Vertrag bereits im Editor ablehnen. Dauer: etwa zehn Minuten.</p>
+
+  <h2>Verwandte Themen</h2>
+  <p><a href="https://react.dev/learn/choosing-the-state-structure#avoid-redundant-state">Redundanten State vermeiden</a> ist dieselbe Regel innerhalb einer Komponente. Compound Components übertragen State Ownership auf komplexere APIs. Reducer helfen, wenn ein kontrollierter Wert mehrere fachliche Übergänge besitzt. <code>useId</code> verbindet wiederverwendbare Felder barrierefrei mit ihren Labels. Form Actions oder Form-Bibliotheken sind Alternativen, wenn feldweiser React-State gar nicht nötig ist.</p>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://react.dev/reference/react-dom/components/input">React 19.3: <code>&lt;input&gt;</code></a></li>
+    <li><a href="https://react.dev/learn/sharing-state-between-components">React: Sharing State Between Components</a></li>
+    <li><a href="https://react.dev/learn/choosing-the-state-structure">React: Choosing the State Structure</a></li>
+    <li><a href="https://react.dev/reference/react/useId">React: <code>useId</code></a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions">TypeScript: Discriminated Unions</a></li>
+  </ul>
+
+  <hr>
+  <footer>
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 09.10.2026 | Eine Komponente braucht genau eine Quelle der Wahrheit | React-Komponenten-APIs | Tief;</p>
+    <p>Bereich-Rotation: heute React-Komponenten-APIs → morgen z. B. TypeScript Conditional Types;</p>
+    <p>Unsicher geblieben: nichts.</p>
+  </footer>
+</article>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,theme:"neutral",securityLevel:"strict"});
+</script>
+</body>
+</html>
