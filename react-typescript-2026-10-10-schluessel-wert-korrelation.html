@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Wie Mapped Types und Indexed Access die Korrelation zwischen Schlüssel und Wert in TypeScript-APIs erhalten.">
+  <title>Ein Schlüssel und sein Wert müssen im Typ zusammenbleiben</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#deded8;--accent:#2457c5;--code:#f1f3f5;--note:#eef4ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101214;--paper:#17191c;--text:#ececea;--muted:#a9aaad;--line:#34373b;--accent:#8eb0ff;--code:#202328;--note:#19253a}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}article{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 48px}
+    h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.16;letter-spacing:-.025em}h1{margin:0 0 18px;font-size:clamp(2.35rem,7vw,4.35rem)}h2{margin:2.8rem 0 .8rem;font-size:1.55rem}
+    .subtitle{font-size:1.28rem;color:var(--muted);line-height:1.5}.meta{margin:24px 0 44px;color:var(--muted);font:.92rem/1.5 system-ui,sans-serif}p{margin:0 0 1.25rem}a{color:var(--accent);text-underline-offset:.16em}
+    code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:.88em}:not(pre)>code{padding:.12em .32em;background:var(--code);border-radius:4px}pre{overflow:auto;padding:20px;border:1px solid var(--line);border-radius:10px;background:var(--code);font:15px/1.55 "SFMono-Regular",Consolas,"Liberation Mono",monospace}
+    .note{padding:18px 20px;border-left:4px solid var(--accent);background:var(--note)}ul{padding-left:1.25rem}li{margin:.55rem 0}.diagram{margin:28px 0;padding:22px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--paper)}.fallback{color:var(--muted);font:.9rem/1.5 system-ui,sans-serif}
+    hr{margin:3.5rem 0 1.25rem;border:0;border-top:1px solid var(--line)}footer{color:var(--muted);font:.9rem/1.55 system-ui,sans-serif}footer p{margin:.35rem 0}@media(max-width:600px){article{padding-top:42px}pre{margin-left:-8px;margin-right:-8px}}
+  </style>
+</head>
+<body>
+<article>
+  <header>
+    <h1>Ein Schlüssel und sein Wert müssen im Typ zusammenbleiben</h1>
+    <p class="subtitle">Zwei korrekt aussehende Unions ergeben noch keinen korrekten Änderungsvertrag. Erst eine Union aus vollständigen Paaren erhält die Beziehung zwischen Feld und Wert.</p>
+    <p class="meta">TypeScript-Typsystem · TypeScript 6.0 · Tief · ~8 min</p>
+  </header>
+
+  <p>Ein Profil-Editor soll Änderungen als kleine Objekte an einen Reducer schicken. <code>field</code> darf nur bekannte Felder enthalten, <code>value</code> nur bekannte Werttypen. Der Code sieht streng typisiert aus. Trotzdem akzeptiert TypeScript plötzlich <code>{ field: "loginCount", value: "oft" }</code>. Beide Einzelwerte gehören jeweils zu irgendeinem Feld – nur nicht zueinander.</p>
+
+  <h2>TL;DR</h2>
+  <p>Modelliere abhängige Angaben nicht als unabhängige Unions. Erzeuge mit einem Mapped Type für jeden Schlüssel eine vollständige Variante und lies diese Zwischenstruktur anschließend mit <code>[keyof T]</code> als Union aus. So bleibt <code>field: "loginCount"</code> mit <code>value: number</code> gekoppelt. Das Muster eignet sich für Reducer-Actions, Event-Queues, Formularänderungen und Command-APIs – aber nicht als Runtime-Validierung externer Daten.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest <a href="https://www.typescriptlang.org/docs/handbook/2/keyof-types.html"><code>keyof</code></a>, <a href="https://www.typescriptlang.org/docs/handbook/2/indexed-access-types.html">Indexed Access Types</a> und <a href="https://www.typescriptlang.org/docs/handbook/2/mapped-types.html">Mapped Types</a> kennen. Die verwendeten Sprachmittel sind in TypeScript 6.0 unverändert verfügbar; der Artikel setzt <code>strict</code> und <code>strictNullChecks</code> voraus.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p><code>keyof T</code> liefert eine Union der Schlüssel. <code>T[keyof T]</code> liefert getrennt davon eine Union aller Werte. In einem Objekt mit beiden Typen entsteht ihr kartesisches Produkt: Jeder Schlüssel darf mit jedem Werttyp kombiniert werden. Die Korrelation existiert nicht mehr. Eine discriminated Union dreht die Modellierung um: Nicht „Schlüsselunion plus Wertunion“, sondern „Union aller gültigen Schlüssel-Wert-Paare“.</p>
+
+  <h2>So macht man es falsch</h2>
+  <p>Die folgende API beschränkt beide Properties und bleibt dennoch zu weit:</p>
+  <pre><code>// profile-change.ts – typisiert, aber unkorreliert
+type EditableProfile = {
+  displayName: string;
+  loginCount: number;
+  newsletter: boolean;
+};
+
+type LooseChange&lt;T extends object&gt; = {
+  field: keyof T;
+  value: T[keyof T];
+};
+
+const acceptedByMistake: LooseChange&lt;EditableProfile&gt; = {
+  field: "loginCount",
+  value: "oft" // string gehört zu displayName – wird trotzdem akzeptiert
+};</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Für <code>EditableProfile</code> wird <code>field</code> zu <code>"displayName" | "loginCount" | "newsletter"</code>. Der Wert wird unabhängig zu <code>string | number | boolean</code>. Nirgends steht noch, dass <code>"newsletter"</code> genau <code>boolean</code> verlangt. Ein generischer Funktionsaufruf mit getrennten Parametern kann die Beziehung kurzfristig erhalten, aber beim Speichern in Arrays, beim Dispatchen oder Serialisieren brauchst du ein einzelnes Objekt, das diese Beziehung selbst trägt.</p>
+  <p>Beobachtbar wird der Fehler erst später: Ein Reducer schreibt einen String in ein Zahlenfeld, eine Validierungsfunktion wählt anhand von <code>field</code> die falsche Annahme oder ein Backend lehnt den Command ab. Der Typ hat Wertebereiche geprüft, aber nicht den Vertrag.</p>
+
+  <h2>So macht man es richtig mit Trade-offs</h2>
+  <p>Der Mapped Type erzeugt zunächst eine Property pro Feld. Jede Property enthält eine vollständige Variante. Der abschließende Indexed Access extrahiert die Property-Werte als Union:</p>
+  <pre><code>// profile-change.ts – vollständiges TypeScript-Modul
+export type ChangeOf&lt;T extends object&gt; = {
+  [K in keyof T]-?: { field: K; value: T[K] }
+}[keyof T];
+
+export type EditableProfile = {
+  displayName: string;
+  loginCount: number;
+  newsletter: boolean;
+};
+
+export type ProfileChange = ChangeOf&lt;EditableProfile&gt;;
+
+export function describeChange(change: ProfileChange): string {
+  switch (change.field) {
+    case "displayName":
+      return `Name: ${change.value.toUpperCase()}`; // value ist string
+    case "loginCount":
+      return `Logins: ${change.value.toFixed(0)}`;  // value ist number
+    case "newsletter":
+      return change.value ? "Newsletter an" : "Newsletter aus";
+  }
+}
+
+export function applyChange(
+  profile: EditableProfile,
+  change: ProfileChange
+): EditableProfile {
+  return { ...profile, [change.field]: change.value };
+}</code></pre>
+  <p>Das <code>-?</code> entfernt Optionalität von der gemappten Zwischenstruktur. Ohne diesen Modifier könnte ein optionales Quellfeld beim abschließenden Indexzugriff zusätzlich <code>undefined</code> als ganze Union-Variante einführen. <code>T[K]</code> darf für ein optionales Feld weiterhin selbst <code>undefined</code> enthalten – das ist eine separate fachliche Entscheidung.</p>
+  <p>Der Trade-off liegt in der Typkomplexität. Bei zwei stabilen Feldern sind explizite Varianten oft lesbarer. Bei vielen Feldern oder häufigen Änderungen verhindert die Ableitung dagegen Drift. Wenn unterschiedliche Felder zusätzliche Metadaten oder Berechtigungen brauchen, ist ein bewusst formulierter Command-Typ besser als noch mehr Typ-Metaprogrammierung.</p>
+
+  <h2>Diagramm</h2>
+  <div class="diagram">
+    <pre class="mermaid">flowchart LR
+      A[EditableProfile] -- keyof --&gt; B[Ein Paar je Schlüssel]
+      B -- Mapped Type --&gt; C[Objekt aus Varianten]
+      C -- indexed access --&gt; D[Union gültiger Changes]
+      D -- narrowing --&gt; E[Korrekter Werttyp]</pre>
+    <p class="fallback">Textuelle Erklärung: Aus jedem Profilfeld entsteht zunächst eine eigene Variante. Der Indexzugriff vereinigt diese Varianten, ohne die Beziehung zwischen jeweiligem Schlüssel und Wert zu verlieren.</p>
+  </div>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Symbole und numerische Schlüssel landen ebenfalls in <code>keyof T</code>; begrenze bei JSON-Commands gegebenenfalls auf <code>Extract&lt;keyof T, string&gt;</code>.</li>
+    <li>Readonly-Felder sollten vor der Ableitung mit <code>Pick</code> oder einem expliziten editierbaren Modell ausgeschlossen werden.</li>
+    <li>Ein Type Assertion wie <code>as ProfileChange</code> kann den Schutz wieder umgehen.</li>
+    <li>Nach <code>JSON.parse</code> brauchst du weiterhin Runtime-Validierung.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Kopiere beide Typen in den TypeScript Playground. Lege je eine Änderung für <code>displayName</code>, <code>loginCount</code> und <code>newsletter</code> an. Vertausche danach zwei Werte. Erwartung: <code>LooseChange</code> akzeptiert die falschen Paare; <code>ChangeOf</code> meldet sie. Ergänze anschließend ein Feld <code>locale: "de" | "en"</code>. Die neue gültige Variante soll automatisch entstehen. Dauer: etwa zehn Minuten.</p>
+
+  <h2>Verwandte Themen</h2>
+  <p>Discriminated Unions ermöglichen das Narrowing im <code>switch</code>. Key Remapping kann technische Felder bei der Ableitung herausfiltern. Conditional Types helfen, nur Felder bestimmter Wertklassen auszuwählen. <code>NoInfer</code> ist nützlich, wenn eine generische Funktion ihren Modelltyp nicht zusätzlich aus dem Change-Argument ableiten soll. Schema-Validierung überführt dieselbe Korrelation an Runtime-Grenzen.</p>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/mapped-types.html">TypeScript Handbook: Mapped Types</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/indexed-access-types.html">TypeScript Handbook: Indexed Access Types</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/keyof-types.html">TypeScript Handbook: Keyof Type Operator</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions">TypeScript Handbook: Discriminated Unions</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+  </ul>
+
+  <hr>
+  <footer>
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 10.10.2026 | Ein Schlüssel und sein Wert müssen im Typ zusammenbleiben | TypeScript-Typsystem | Tief;</p>
+    <p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. React-Context;</p>
+    <p>Unsicher geblieben: nichts.</p>
+  </footer>
+</article>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,theme:"neutral",securityLevel:"strict"});
+</script>
+</body>
+</html>
