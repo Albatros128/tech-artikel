@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Warum die Position eines React-Context-Providers Besitz, Lebenszeit und gemeinsame Nutzung von Zustand bestimmt.">
+  <title>Der Provider bestimmt die Lebenszeit des Zustands</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#deded8;--accent:#2457c5;--code:#f1f3f5;--note:#eef4ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101214;--paper:#17191c;--text:#ececea;--muted:#a9aaad;--line:#34373b;--accent:#8eb0ff;--code:#202328;--note:#19253a}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}article{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 48px}
+    h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.16;letter-spacing:-.025em}h1{margin:0 0 18px;font-size:clamp(2.35rem,7vw,4.35rem)}h2{margin:2.8rem 0 .8rem;font-size:1.55rem}.subtitle{font-size:1.28rem;color:var(--muted);line-height:1.5}.meta{margin:24px 0 44px;color:var(--muted);font:.92rem/1.5 system-ui,sans-serif}
+    p{margin:0 0 1.25rem}a{color:var(--accent);text-underline-offset:.16em}code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:.88em}:not(pre)>code{padding:.12em .32em;background:var(--code);border-radius:4px}pre{overflow:auto;padding:20px;border:1px solid var(--line);border-radius:10px;background:var(--code);font:15px/1.55 "SFMono-Regular",Consolas,"Liberation Mono",monospace}
+    .note{padding:18px 20px;border-left:4px solid var(--accent);background:var(--note)}ul{padding-left:1.25rem}li{margin:.55rem 0}.diagram{margin:28px 0;padding:22px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--paper)}.fallback{color:var(--muted);font:.9rem/1.5 system-ui,sans-serif}hr{margin:3.5rem 0 1.25rem;border:0;border-top:1px solid var(--line)}footer{color:var(--muted);font:.9rem/1.55 system-ui,sans-serif}footer p{margin:.35rem 0}@media(max-width:600px){article{padding-top:42px}pre{margin-left:-8px;margin-right:-8px}}
+  </style>
+</head>
+<body>
+<article>
+  <header>
+    <h1>Der Provider bestimmt die Lebenszeit des Zustands</h1>
+    <p class="subtitle">Context ist kein globaler Store. Wo du den Provider in den Baum setzt, entscheidet, welche Komponenten denselben Zustand teilen und wann dieser Zustand verworfen wird.</p>
+    <p class="meta">React-Context · React 19.3 + TypeScript · Tief · ~8 min</p>
+  </header>
+
+  <p>Eine Verwaltungsoberfläche öffnet zwei Kundeneditoren nebeneinander. Beide verwenden denselben <code>useCustomerDraft</code>-Hook. Beim Tippen in „Notiz“ ändert sich plötzlich auch der andere Editor. Der Reducer ist korrekt, die IDs sind unterschiedlich und React mischt keinen State. Beide Editoren lesen schlicht dieselbe Provider-Instanz, weil der Provider weit oben um die gesamte Anwendung liegt.</p>
+
+  <h2>TL;DR</h2>
+  <p><code>createContext</code> erzeugt keinen Zustand. Der Zustand lebt in der Komponente, die ihn per Provider verteilt. Ein Provider oberhalb mehrerer Editoren bedeutet absichtlich eine gemeinsame Instanz; ein Provider pro Editor erzeugt isolierte Instanzen. Setze fachlichen Zustand deshalb an die kleinste Baumgrenze, die ihn wirklich teilen soll. Nutze einen stabilen <code>key</code>, wenn ein Wechsel der fachlichen Identität den State bewusst zurücksetzen muss.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest <a href="https://react.dev/reference/react/createContext"><code>createContext</code></a>, <a href="https://react.dev/reference/react/useContext"><code>useContext</code></a> und die Regeln zur <a href="https://react.dev/learn/preserving-and-resetting-state">State-Identität im Komponentenbaum</a> kennen. Seit React 19 kann das Context-Objekt selbst als Provider gerendert werden; die ältere <code>&lt;Context.Provider&gt;</code>-Schreibweise bleibt für ältere Versionen relevant.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Die React-Dokumentation formuliert es ausdrücklich: Das Context-Objekt selbst hält keine Information. Es bezeichnet nur die Art von Information, die Provider anbieten und Konsumenten lesen. <code>useContext</code> sucht vom Konsumenten nach oben und nimmt den Wert des nächsten passenden Providers. Damit ist Provider-Platzierung keine Verkabelungsfrage, sondern eine Entscheidung über Ownership und Lebenszeit.</p>
+
+  <h2>So macht man es falsch</h2>
+  <p>Ein App-weiter Provider wirkt bequem, erweitert aber den Sharing-Bereich jedes Drafts auf die gesamte Anwendung:</p>
+  <pre><code>// App.tsx – problematischer Ausschnitt
+import { CustomerDraftProvider } from "./customer-draft";
+
+export function App() {
+  return (
+    &lt;CustomerDraftProvider initialCustomerId="none"&gt;
+      &lt;Router /&gt;
+    &lt;/CustomerDraftProvider&gt;
+  );
+}
+
+// Zwei Editoren darunter lesen dieselbe Draft-Instanz.
+export function Workspace({ ids }: { ids: string[] }) {
+  return ids.map(id =&gt; &lt;CustomerEditor key={id} customerId={id} /&gt;);
+}</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Der Fehler liegt nicht in Context, sondern in der behaupteten Fachlichkeit: Der App-Provider sagt „alle Nachfahren teilen einen CustomerDraft“. <code>customerId</code> als Prop am Editor erzeugt keine neue Provider- oder State-Instanz. Auch ein Context-Wert mit mehreren Feldern löst das Ownership-Problem nicht automatisch; er macht nur den gemeinsam genutzten Zustand größer.</p>
+  <p>Der Default-Wert kann den Fehler zusätzlich verschleiern. Ein scheinbar gültiges leeres Draft-Objekt aus <code>createContext</code> lässt Komponenten außerhalb des Providers weiterlaufen. Für zwingende fachliche Provider ist <code>null</code> plus ein Hook, der ohne Provider wirft, meist die ehrlichere API.</p>
+
+  <h2>So macht man es richtig mit Trade-offs</h2>
+  <p>Der Provider besitzt Reducer und State. Der Workspace erzeugt pro fachlicher Editor-Instanz einen Provider. Der <code>key</code> verbindet Reacts Komponentenidentität mit der Kunden-ID:</p>
+  <pre><code>// customer-draft.tsx – vollständiger relevanter Ausschnitt
+import {
+  createContext, useContext, useMemo, useReducer,
+  type Dispatch, type ReactNode
+} from "react";
+
+type Draft = { customerId: string; note: string };
+type Action = { type: "noteChanged"; note: string };
+
+export function draftReducer(state: Draft, action: Action): Draft {
+  switch (action.type) {
+    case "noteChanged": return { ...state, note: action.note };
+  }
+}
+
+type DraftContextValue = { draft: Draft; dispatch: Dispatch&lt;Action&gt; };
+const DraftContext = createContext&lt;DraftContextValue | null&gt;(null);
+
+export function CustomerDraftProvider(props: {
+  customerId: string;
+  children: ReactNode;
+}) {
+  const [draft, dispatch] = useReducer(draftReducer, {
+    customerId: props.customerId,
+    note: ""
+  });
+  const value = useMemo(() =&gt; ({ draft, dispatch }), [draft]);
+  return &lt;DraftContext value={value}&gt;{props.children}&lt;/DraftContext&gt;;
+}
+
+export function useCustomerDraft(): DraftContextValue {
+  const value = useContext(DraftContext);
+  if (value === null) throw new Error("CustomerDraftProvider fehlt");
+  return value;
+}
+
+export function Workspace({ ids }: { ids: string[] }) {
+  return ids.map(customerId =&gt; (
+    &lt;CustomerDraftProvider key={customerId} customerId={customerId}&gt;
+      &lt;CustomerEditor /&gt;
+    &lt;/CustomerDraftProvider&gt;
+  ));
+}</code></pre>
+  <p>Wird ein Editor entfernt, verschwindet seine Provider-Komponente und damit ihr Reducer-State. Eine neue ID erzeugt wegen des anderen <code>key</code> bewusst eine neue Instanz. Das ist dokumentiertes React-Verhalten zur State-Position im Baum, keine Eigenschaft von Context allein.</p>
+  <p>Der Trade-off: Tief platzierte Provider machen Abhängigkeiten weniger sichtbar und können Tests mehr Setup kosten. Bei wenigen Ebenen sind Props oft klarer. Soll der Draft Navigation, Remounts oder mehrere getrennte Baumzweige überleben, ist ein externer Store oder ein Router-/Server-Cache die passendere Ownership-Grenze.</p>
+
+  <h2>Diagramm</h2>
+  <div class="diagram">
+    <pre class="mermaid">flowchart TD
+      W[Workspace]
+      W -- Kunde A --&gt; PA[DraftProvider A]
+      W -- Kunde B --&gt; PB[DraftProvider B]
+      PA -- eigener State --&gt; EA[Editor A]
+      PB -- eigener State --&gt; EB[Editor B]</pre>
+    <p class="fallback">Textuelle Erklärung: Der Workspace erzeugt zwei Provider-Instanzen. Jeder Editor findet beim Lesen den jeweils nächsten Provider und erhält dadurch einen isolierten Reducer-State.</p>
+  </div>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Ein neuer <code>customerId</code>-Propwert initialisiert <code>useReducer</code> nicht erneut; dafür braucht es einen bewussten Identitätswechsel per <code>key</code> oder eine Action.</li>
+    <li>Ein Provider im selben Komponenten-Return unterhalb eines <code>useContext</code>-Aufrufs beeinflusst diesen Aufruf nicht.</li>
+    <li>Neue Objektidentitäten im Context-Wert können Konsumenten aktualisieren; optimiere erst nach einer Messung.</li>
+    <li>Globale Provider sind für tatsächlich globale Werte wie Theme oder Session weiterhin sinnvoll.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Rendere zwei Editoren zunächst unter einem gemeinsamen Provider und gib in beiden die aktuelle <code>customerId</code> und Notiz aus. Ändere eine Notiz. Verschiebe danach den Provider in die <code>map</code>-Schleife und wiederhole den Versuch. Erwartung: Zuerst teilen beide Editoren einen Draft; danach ändern sie sich unabhängig. Tausche zusätzlich eine ID aus und beobachte den Reset durch den neuen <code>key</code>. Dauer: etwa zehn Minuten.</p>
+
+  <h2>Verwandte Themen</h2>
+  <p>Reducer modellieren erlaubte Draft-Übergänge. State Colocation setzt dieselbe Ownership-Idee ohne Context um. Split Contexts für State und Dispatch können Abhängigkeiten präziser machen, sollten aber anhand realer Renderprofile bewertet werden. Externe Stores lösen Sharing außerhalb eines einzelnen React-Teilbaums. Router-Keys und Komponenten-Keys steuern bewusst, wann React Zustand erhält oder verwirft.</p>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://react.dev/reference/react/createContext">React 19.3: <code>createContext</code></a></li>
+    <li><a href="https://react.dev/reference/react/useContext">React 19.3: <code>useContext</code></a></li>
+    <li><a href="https://react.dev/learn/passing-data-deeply-with-context">React: Passing Data Deeply with Context</a></li>
+    <li><a href="https://react.dev/learn/preserving-and-resetting-state">React: Preserving and Resetting State</a></li>
+    <li><a href="https://react.dev/learn/scaling-up-with-reducer-and-context">React: Scaling Up with Reducer and Context</a></li>
+  </ul>
+
+  <hr>
+  <footer>
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 11.10.2026 | Der Provider bestimmt die Lebenszeit des Zustands | React-Context | Tief;</p>
+    <p>Bereich-Rotation: heute React-Context → morgen z. B. Tests und Accessibility;</p>
+    <p>Unsicher geblieben: nichts.</p>
+  </footer>
+</article>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,theme:"neutral",securityLevel:"strict"});
+</script>
+</body>
+</html>
