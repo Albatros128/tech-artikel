@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Der zugängliche Name gehört zur Komponenten-API</title>
+  <meta name="description" content="Warum React-Komponenten über Rolle und zugänglichen Namen getestet werden sollten – und nicht über data-testid.">
+  <style>
+    :root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#6b6b6b;--line:#dededb;--code:#f3f3f1;--accent:#1a6b4f;--note:#edf7f2}
+    @media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#202321;--accent:#78d2ad;--note:#1c2c25}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Georgia,"Times New Roman",serif;font-size:19px;line-height:1.72}
+    main{width:min(720px,calc(100% - 36px));margin:0 auto;padding:72px 0 64px}h1{font-family:system-ui,sans-serif;font-size:clamp(2.3rem,7vw,4.2rem);line-height:1.04;letter-spacing:-.045em;margin:0 0 20px}
+    .subtitle{font-size:1.35rem;line-height:1.45;color:var(--muted);margin:0 0 18px}.meta{font:600 .82rem/1.5 system-ui,sans-serif;letter-spacing:.035em;color:var(--muted);margin-bottom:48px}
+    h2{font-family:system-ui,sans-serif;font-size:1.65rem;line-height:1.22;letter-spacing:-.02em;margin:54px 0 15px}p{margin:0 0 24px}a{color:var(--accent);text-underline-offset:3px}
+    pre{overflow:auto;padding:22px;margin:25px 0;border:1px solid var(--line);border-radius:10px;background:var(--code);font:14px/1.62 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}
+    .callout{padding:18px 21px;border-left:4px solid var(--accent);background:var(--note);margin:28px 0}.callout p:last-child{margin-bottom:0}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}.mermaid{text-align:center;font-family:system-ui,sans-serif}figcaption{color:var(--muted);font-size:.9rem;line-height:1.5;margin-top:16px}
+    ul{padding-left:1.25rem}li{margin:.7rem 0}hr{border:0;border-top:1px solid var(--line);margin:56px 0 28px}.history{font:14px/1.6 system-ui,sans-serif;color:var(--muted);margin:8px 0}
+    @media(max-width:600px){main{padding-top:42px}body{font-size:18px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({startOnLoad:true,theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});
+  </script>
+</head>
+<body>
+<main>
+  <h1>Der zugängliche Name gehört zur Komponenten-API</h1>
+  <p class="subtitle">Ein Test, der nur ein <code>data-testid</code> findet, kann grün sein, obwohl Nutzer den Button nicht finden können.</p>
+  <p class="meta">Accessibility &amp; Tests · React 19.3 + Testing Library · Tief · ~8 min</p>
+
+  <p>Im Projektboard steht hinter jeder Zeile ein Papierkorb-Icon. Der Klicktest ist grün, der Lösch-Callback wird exakt einmal aufgerufen. Trotzdem meldet das Accessibility-Audit einen namenlosen Button. Der Test hat die Implementierung gefunden – nicht das Bedienelement, das ein Mensch über Tastatur oder assistive Technologie wahrnimmt.</p>
+
+  <h2>TL;DR</h2>
+  <p>Behandle Rolle und zugänglichen Namen als öffentlichen Vertrag einer interaktiven React-Komponente. Frage in Tests mit <code>getByRole("button", { name: ... })</code> ab. So scheitert derselbe Test sowohl bei einer kaputten Interaktion als auch dann, wenn das Element aus dem Accessibility Tree verschwindet oder seinen Namen verliert. <code>data-testid</code> bleibt eine sinnvolle Ausnahme, aber kein Standard-Selektor für bedienbare UI.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest React-Komponenten und Vitest oder Jest kennen. Relevant sind außerdem die <a href="https://testing-library.com/docs/queries/about/#priority">Query-Priorität von Testing Library</a>, die <a href="https://testing-library.com/docs/queries/byrole/">Semantik von <code>getByRole</code></a> und die <a href="https://www.w3.org/TR/accname-1.2/">Accessible Name and Description Computation</a>. Der Artikel bezieht sich auf <a href="https://react.dev/versions">React 19.3</a>; das Prinzip selbst stammt aus der Webplattform.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Ein zugänglicher Name ist kein zusätzlicher Test-Hook. Browser leiten ihn nach einer definierten Priorität aus Textinhalt, verknüpften Labels und ARIA-Attributen ab. Genau diese Repräsentation nutzen assistive Technologien. Eine Rollenabfrage testet deshalb nicht bloß ein anderes Attribut, sondern den semantischen Ausgang deiner Komponente.</p>
+  <div class="callout"><p>Der Testselektor und die zugängliche Bedienoberfläche können derselbe Vertrag sein. Dann wird fehlende Accessibility zu einem normalen, sichtbaren Testfehler.</p></div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Das folgende Beispiel ist realistisch: Das Icon ist rein visuell, der Selektor stabil und der Callback korrekt. Der Button hat jedoch keinen Namen. Der Test kann diesen Defekt nicht erkennen, weil <code>data-testid</code> unabhängig von der Accessibility-Berechnung existiert.</p>
+  <pre><code>// DeleteProjectButton.tsx
+type Props = { onDelete: () =&gt; void };
+
+export function DeleteProjectButton({ onDelete }: Props) {
+  return (
+    &lt;button data-testid="delete-project" onClick={onDelete}&gt;
+      &lt;svg aria-hidden="true" viewBox="0 0 24 24"&gt;…&lt;/svg&gt;
+    &lt;/button&gt;
+  );
+}
+
+// DeleteProjectButton.test.tsx
+import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
+import { DeleteProjectButton } from "./DeleteProjectButton";
+
+it("löscht das Projekt", () =&gt; {
+  const onDelete = vi.fn();
+  render(&lt;DeleteProjectButton onDelete={onDelete} /&gt;);
+  fireEvent.click(screen.getByTestId("delete-project"));
+  expect(onDelete).toHaveBeenCalledOnce();
+});</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Ein <code>&lt;button&gt;</code> liefert seine Rolle bereits aus nativer HTML-Semantik. Sein zugänglicher Name stammt normalerweise aus dem Text zwischen den Tags. Ein ausschließlich grafischer Inhalt, der mit <code>aria-hidden="true"</code> korrekt aus dem Accessibility Tree entfernt wird, hinterlässt hier aber keinen Namen. MDN nennt einen Icon-Button ausdrücklich als Fall für <a href="https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-label"><code>aria-label</code></a>.</p>
+  <p><code>fireEvent.click</code> beweist nur, dass ein synthetisches Click-Ereignis den Handler erreicht. Die dokumentierte Leitidee von Testing Library ist näher an echter Nutzung: semantisch auffinden, dann über <code>user-event</code> interagieren. Das ist kein vollständiger Screenreader-Test, aber es deckt eine wichtige gemeinsame Schnittstelle ab.</p>
+
+  <h2>So macht man es richtig – mit Trade-offs</h2>
+  <p>Der Projektname gehört in den Vertrag der Komponente. Dadurch unterscheidet der zugängliche Name mehrere Lösch-Buttons auf derselben Seite. Das Icon bleibt dekorativ; das native <code>button</code>-Element behält Fokus-, Tastatur- und Form-Semantik.</p>
+  <pre><code>// DeleteProjectButton.tsx
+type Props = {
+  projectName: string;
+  onDelete: () =&gt; void;
+};
+
+export function DeleteProjectButton({ projectName, onDelete }: Props) {
+  return (
+    &lt;button
+      type="button"
+      aria-label={`Projekt ${projectName} löschen`}
+      onClick={onDelete}
+    &gt;
+      &lt;svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"&gt;
+        {/* Pfade ausgelassen */}
+      &lt;/svg&gt;
+    &lt;/button&gt;
+  );
+}</code></pre>
+  <pre><code>// DeleteProjectButton.test.tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { vi } from "vitest";
+import { DeleteProjectButton } from "./DeleteProjectButton";
+
+it("löscht das eindeutig benannte Projekt", async () =&gt; {
+  const user = userEvent.setup();
+  const onDelete = vi.fn();
+
+  render(
+    &lt;DeleteProjectButton projectName="Atlas" onDelete={onDelete} /&gt;
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "Projekt Atlas löschen" })
+  );
+  expect(onDelete).toHaveBeenCalledOnce();
+});</code></pre>
+  <p>Der Trade-off ist bewusst: Eine redaktionelle Änderung am Namen kann den Test brechen. Wenn der Name Produktverhalten ist, ist das erwünscht. Für Übersetzungen kannst du dieselbe Übersetzungsfunktion im Test nutzen oder gezielt mit einem regulären Ausdruck arbeiten. Kopiere jedoch nicht die komplette Komponentenlogik in den Test – sonst können beide gemeinsam falsch sein.</p>
+
+  <h2>Diagramm</h2>
+  <figure>
+    <div class="mermaid">
+flowchart LR
+  P[Komponenten-Props] --&gt; D[Semantisches DOM]
+  D --&gt; A[Accessibility Tree]
+  A --&gt; Q[Abfrage nach Rolle und Name]
+  Q --&gt; U[Nutzerinteraktion]
+    </div>
+    <figcaption>Der Projektname fließt über DOM-Semantik in den Accessibility Tree. Die Testabfrage setzt genau dort an; ohne Mermaid beschreibt diese Zeile denselben Datenfluss.</figcaption>
+    <noscript><p>Textalternative: Props erzeugen semantisches DOM; daraus entsteht der Accessibility Tree, den der Test über Rolle und Namen abfragt, bevor er interagiert.</p></noscript>
+  </figure>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Hat das Element sichtbaren Beschriftungstext, bevorzuge ihn. MDN empfiehlt <code>aria-labelledby</code>, wenn bereits sichtbarer Text referenziert werden kann.</li>
+    <li><code>aria-label</code> repariert keine falsche Rolle. Ein <code>div</code> wird dadurch nicht zum tastaturbedienbaren Button.</li>
+    <li>Nutze <code>findByRole</code>, wenn das Element asynchron erscheint; <code>getByRole</code> wartet nicht.</li>
+    <li><code>data-testid</code> bleibt passend für nicht-semantische Details, die Nutzer weder sehen noch bedienen.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Plane zehn Minuten ein. Führe beide Tests zunächst grün aus. Entferne dann nur <code>aria-label</code> aus der verbesserten Komponente. Der Test mit <code>getByRole</code> soll fehlschlagen und die verfügbaren Rollen ausgeben; der alte Test mit <code>getByTestId</code> bleibt grün. Ergänze anschließend zwei Projekte und prüfe, dass du über den vollständigen Namen gezielt nur „Atlas“ löschst. Die erwartete Beobachtung: Semantik macht sowohl den Defekt als auch die Mehrdeutigkeit messbar.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>Fokusmanagement in Dialogen:</strong> Rollenabfragen finden den Dialog; ein vollständiger Vertrag umfasst zusätzlich initialen und zurückgegebenen Fokus.</li>
+    <li><strong>Native Elemente vor ARIA:</strong> Semantik, Tastaturverhalten und Browserintegration entstehen gemeinsam.</li>
+    <li><strong>Component Tests versus E2E:</strong> Derselbe zugängliche Name kann auf beiden Ebenen als stabiler Nutzervertrag dienen.</li>
+    <li><strong>Lokalisierte Tests:</strong> Übersetzte Namen brauchen eine Strategie, die echte Copy-Regressions von bloßer Testduplizierung trennt.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://react.dev/versions">React: Versions</a> – aktueller Versionsbezug 19.3.</li>
+    <li><a href="https://testing-library.com/docs/queries/about/#priority">Testing Library: About Queries – Priority</a> – bevorzugte nutzernahe Abfragen.</li>
+    <li><a href="https://testing-library.com/docs/queries/byrole/">Testing Library: ByRole</a> – Rolle und Filter über den zugänglichen Namen.</li>
+    <li><a href="https://www.w3.org/TR/accname-1.2/">W3C: Accessible Name and Description Computation 1.2</a> – normative Namensberechnung.</li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-label">MDN: aria-label</a> – Benennung von Icon-Buttons und Alternativen.</li>
+  </ul>
+
+  <hr>
+  <p class="history">Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 12.10.2026 | Der zugängliche Name gehört zur Komponenten-API | Accessibility &amp; Tests | Tief;</p>
+  <p class="history">Bereich-Rotation: heute Accessibility &amp; Tests → morgen z. B. TypeScript-Typsystem;</p>
+  <p class="history">Unsicher geblieben: nichts.</p>
+</main>
+</body>
+</html>
