@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nicht jedes Argument darf den Generic-Typ mitbestimmen</title>
+  <meta name="description" content="Wie NoInfer eine Quelle der Wahrheit für TypeScript-Inferenz festlegt und generische APIs präziser macht.">
+  <style>
+    :root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#6b6b6b;--line:#dededb;--code:#f3f3f1;--accent:#3157a4;--note:#eef3fb}
+    @media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#202321;--accent:#91b5ff;--note:#1d2637}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Georgia,"Times New Roman",serif;font-size:19px;line-height:1.72}
+    main{width:min(720px,calc(100% - 36px));margin:0 auto;padding:72px 0 64px}h1{font-family:system-ui,sans-serif;font-size:clamp(2.3rem,7vw,4.2rem);line-height:1.04;letter-spacing:-.045em;margin:0 0 20px}
+    .subtitle{font-size:1.35rem;line-height:1.45;color:var(--muted);margin:0 0 18px}.meta{font:600 .82rem/1.5 system-ui,sans-serif;letter-spacing:.035em;color:var(--muted);margin-bottom:48px}
+    h2{font-family:system-ui,sans-serif;font-size:1.65rem;line-height:1.22;letter-spacing:-.02em;margin:54px 0 15px}p{margin:0 0 24px}a{color:var(--accent);text-underline-offset:3px}
+    pre{overflow:auto;padding:22px;margin:25px 0;border:1px solid var(--line);border-radius:10px;background:var(--code);font:14px/1.62 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}
+    .callout{padding:18px 21px;border-left:4px solid var(--accent);background:var(--note);margin:28px 0}.callout p:last-child{margin-bottom:0}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}.mermaid{text-align:center;font-family:system-ui,sans-serif}figcaption{color:var(--muted);font-size:.9rem;line-height:1.5;margin-top:16px}
+    ul{padding-left:1.25rem}li{margin:.7rem 0}hr{border:0;border-top:1px solid var(--line);margin:56px 0 28px}.history{font:14px/1.6 system-ui,sans-serif;color:var(--muted);margin:8px 0}
+    @media(max-width:600px){main{padding-top:42px}body{font-size:18px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({startOnLoad:true,theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});
+  </script>
+</head>
+<body>
+<main>
+  <h1>Nicht jedes Argument darf den Generic-Typ mitbestimmen</h1>
+  <p class="subtitle"><code>NoInfer&lt;T&gt;</code> macht aus einem Parameter eine Prüfung, statt ihn heimlich zur zweiten Quelle der Wahrheit zu machen.</p>
+  <p class="meta">TypeScript-Typsystem · TypeScript 7.0.2, NoInfer seit 5.4 · Tief · ~8 min</p>
+
+  <p>Ein Workflow kennt die Zustände <code>draft</code>, <code>review</code> und <code>published</code>. Die Konfigurationsfunktion soll daraus eine präzise Union ableiten und sicherstellen, dass der Initialzustand dazugehört. Trotzdem akzeptiert TypeScript plötzlich <code>archived</code>. Nicht die Union ist falsch modelliert – die Inferenz hat zu viele Stimmen bekommen.</p>
+
+  <h2>TL;DR</h2>
+  <p>Wenn ein generischer Typ aus einem Argument entstehen und ein anderes Argument nur dagegen geprüft werden soll, markiere das zweite mit <code>NoInfer&lt;T&gt;</code>. Dadurch sammelt TypeScript dort keine Inferenzkandidaten mehr. Der Parameter bleibt vom Typ <code>T</code>, beeinflusst aber nicht, was <code>T</code> wird. Das Muster eignet sich für Defaults, Fallbacks und Initialwerte; es ersetzt weder Runtime-Validierung noch gutes API-Design.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest <a href="https://www.typescriptlang.org/docs/handbook/2/generics.html">Generics</a>, Literal-Unions und Inferenz kennen. Die offizielle Referenz dokumentiert <a href="https://www.typescriptlang.org/docs/handbook/utility-types.html#noinfertype"><code>NoInfer&lt;Type&gt;</code></a> als Utility Type seit 5.4. Der Versionsbezug dieses Artikels ist <a href="https://github.com/microsoft/TypeScript/releases/tag/v7.0.2">TypeScript 7.0.2</a>; die beschriebene Semantik ist seit der Einführung stabil.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Ein Parameter vom Typ <code>T</code> erfüllt in einer generischen Signatur oft zwei Aufgaben: Er liefert Kandidaten für <code>T</code> und wird anschließend auf Kompatibilität mit <code>T</code> geprüft. Diese Rollen sehen syntaktisch gleich aus, sind konzeptionell aber verschieden. Bei einem Default soll die Optionsliste bestimmen, was erlaubt ist. Der Default soll lediglich beweisen, dass er dazugehört.</p>
+  <div class="callout"><p><code>NoInfer</code> macht einen Parameter nicht strenger. Es entscheidet, wer den Vertrag formuliert und wer ihn nur erfüllen muss.</p></div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Die Signatur wirkt zunächst korrekt. Beide Parameter verwenden dieselbe Union <code>S</code>. Genau dadurch darf jedoch auch <code>initial</code> Kandidaten für <code>S</code> liefern.</p>
+  <pre><code>// workflow.ts – problematische Variante
+type Workflow&lt;S extends string&gt; = {
+  states: readonly S[];
+  initial: S;
+};
+
+export function defineWorkflow&lt;const S extends string&gt;(
+  states: readonly S[],
+  initial: S,
+): Workflow&lt;S&gt; {
+  return { states, initial };
+}
+
+const editorial = defineWorkflow(
+  ["draft", "review", "published"],
+  "archived", // kann S erweitern, statt abgelehnt zu werden
+);
+
+// S kann als "draft" | "review" | "published" | "archived"
+// inferiert werden.</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>TypeScript löst Generics strukturell. Es sucht passende Kandidaten an allen Inferenzpositionen und wählt einen Typ, der den Aufruf ermöglicht. Aus der Liste kommen drei Literale, aus dem zweiten Argument ein viertes. Eine größere Union erfüllt beide Parameter – also besteht der Aufruf, obwohl er die fachliche Absicht verletzt.</p>
+  <p>Das beobachtbare Symptom ist tückisch: Im Editor erscheint kein Fehler, und der Rückgabetyp behauptet anschließend, <code>archived</code> sei ein erlaubter Zustand. Die Implementierung hat zur Laufzeit nichts geprüft; Typen werden beim Emit entfernt. Die <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-4.html#the-noinfer-utility-type">Release Notes zu TypeScript 5.4</a> beschreiben genau dieses Problem als konkurrierende Inferenzquellen.</p>
+
+  <h2>So macht man es richtig – mit Trade-offs</h2>
+  <p>Die Zustandsliste ist die Quelle. <code>NoInfer&lt;S&gt;</code> verhindert nur am Initialwert die Kandidatensuche. Danach wird der Wert normal gegen die bereits bestimmte Union geprüft.</p>
+  <pre><code>// workflow.ts – TypeScript 5.4+
+type Workflow&lt;S extends string&gt; = {
+  states: readonly S[];
+  initial: S;
+};
+
+export function defineWorkflow&lt;const S extends string&gt;(
+  states: readonly S[],
+  initial: NoInfer&lt;S&gt;,
+): Workflow&lt;S&gt; {
+  if (!states.includes(initial)) {
+    throw new Error(`Unbekannter Initialzustand: ${initial}`);
+  }
+  return { states, initial };
+}
+
+const editorial = defineWorkflow(
+  ["draft", "review", "published"],
+  "draft", // OK
+);
+
+defineWorkflow(
+  ["draft", "review", "published"],
+  "archived", // Fehler: nicht Teil der inferierten Union
+);</code></pre>
+  <p>Der Runtime-Guard wirkt im vollständig typisierten Aufruf redundant, schützt aber JavaScript-Consumer, unsichere Casts und dynamische Grenzen. Der Trade-off von <code>NoInfer</code>: Die API legt bewusst eine Inferenzrichtung fest. Wenn beide Argumente gleichberechtigt den Typ bilden sollen, wäre es falsch. Als Alternative kann eine curried API zuerst die Zustände festlegen und in einem zweiten Aufruf den Default annehmen. Das ist eindeutig, kostet aber einen zusätzlichen Aufruf und verändert die Ergonomie.</p>
+  <pre><code>// Alternative: Inferenz zeitlich trennen
+const workflowFrom = &lt;const S extends string&gt;(states: readonly S[]) =&gt;
+  (initial: S): Workflow&lt;S&gt; =&gt; ({ states, initial });
+
+const editorial = workflowFrom(["draft", "review", "published"])(
+  "draft",
+);</code></pre>
+
+  <h2>Diagramm</h2>
+  <figure>
+    <div class="mermaid">
+flowchart TD
+  A[Zustandsliste] -- Kandidaten --&gt; C[Inferenz für S]
+  B[Initialwert] -. ohne NoInfer: Kandidat .-&gt; C
+  C -- bestimmt --&gt; T[Literal-Union S]
+  B -- mit NoInfer: nur Wert --&gt; V[Zuweisungsprüfung]
+  T -- Vertrag --&gt; V
+    </div>
+    <figcaption>Ohne <code>NoInfer</code> verbreitert der Initialwert die Union. Mit <code>NoInfer</code> entsteht <code>S</code> allein aus der Liste; der Initialwert wird erst danach geprüft.</figcaption>
+    <noscript><p>Textalternative: Die Liste bestimmt die Literal-Union. Der Initialwert liefert mit NoInfer keinen Kandidaten, sondern wird anschließend gegen diese Union geprüft.</p></noscript>
+  </figure>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>NoInfer</code> konserviert keine Literale von selbst. Für API-Eingaben helfen <code>const</code>-Typparameter oder <code>as const</code>.</li>
+    <li>Ist die Liste bereits nur als <code>string[]</code> typisiert, bleibt <code>S</code> breit. Dann kann der Compiler unbekannte Werte nicht unterscheiden.</li>
+    <li>Ersetze damit keine Runtime-Prüfung an Netzwerk-, Storage- oder JavaScript-Grenzen.</li>
+    <li>Verteile <code>NoInfer</code> nicht reflexartig. Dokumentiere, welcher Parameter die fachliche Quelle der Wahrheit ist.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Plane zehn Minuten ein. Kopiere beide Varianten in den TypeScript Playground und aktiviere <code>strict</code>. Fahre über <code>editorial</code> und vergleiche die inferierte Union. Setze anschließend <code>states</code> in eine Variable vom Typ <code>string[]</code>. Erwartung: <code>NoInfer</code> weist <code>archived</code> bei der Literal-Liste zurück, kann bei der verbreiterten <code>string[]</code> aber keine verlorene Information zurückholen. Ergänze zuletzt einen Wert aus <code>JSON.parse</code> und beobachte, warum der Runtime-Guard weiterhin eine eigene Aufgabe hat.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>Const-Typparameter:</strong> Sie bewahren Literalinformationen an der Inferenzquelle.</li>
+    <li><strong><code>satisfies</code>:</strong> Es prüft einen Vertrag, ohne den präzisen Ausdruckstyp zu ersetzen.</li>
+    <li><strong>Runtime-Validierung:</strong> Sie übernimmt dort, wo Compile-Time-Typen keine Herkunft garantieren.</li>
+    <li><strong>Builder- und Curry-APIs:</strong> Getrennte Aufrufphasen können Inferenzreihenfolgen explizit modellieren.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://github.com/microsoft/TypeScript/releases/tag/v7.0.2">Microsoft/TypeScript: Release 7.0.2</a> – aktueller stabiler Versionsbezug.</li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/utility-types.html#noinfertype">TypeScript Handbook: <code>NoInfer&lt;Type&gt;</code></a> – Referenz und Semantik.</li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-4.html#the-noinfer-utility-type">TypeScript 5.4 Release Notes: The <code>NoInfer</code> Utility Type</a> – Motivation und Einführung.</li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/generics.html">TypeScript Handbook: Generics</a> – Grundlagen generischer Beziehungen.</li>
+  </ul>
+
+  <hr>
+  <p class="history">Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 13.10.2026 | Nicht jedes Argument darf den Generic-Typ mitbestimmen | TypeScript-Typsystem | Tief;</p>
+  <p class="history">Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. React-Concurrent-Rendering;</p>
+  <p class="history">Unsicher geblieben: nichts.</p>
+</main>
+</body>
+</html>
