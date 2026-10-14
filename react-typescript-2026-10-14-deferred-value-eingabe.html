@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verzögere das Ergebnis, nicht die Eingabe</title>
+  <meta name="description" content="Wie useDeferredValue dringende Eingaben von unterbrechbaren Ergebnis-Renderings trennt.">
+  <style>
+    :root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#6b6b6b;--line:#dededb;--code:#f3f3f1;--accent:#7048a8;--note:#f5effb}
+    @media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#202321;--accent:#c5a1f3;--note:#2a2035}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Georgia,"Times New Roman",serif;font-size:19px;line-height:1.72}
+    main{width:min(720px,calc(100% - 36px));margin:0 auto;padding:72px 0 64px}h1{font-family:system-ui,sans-serif;font-size:clamp(2.3rem,7vw,4.2rem);line-height:1.04;letter-spacing:-.045em;margin:0 0 20px}
+    .subtitle{font-size:1.35rem;line-height:1.45;color:var(--muted);margin:0 0 18px}.meta{font:600 .82rem/1.5 system-ui,sans-serif;letter-spacing:.035em;color:var(--muted);margin-bottom:48px}
+    h2{font-family:system-ui,sans-serif;font-size:1.65rem;line-height:1.22;letter-spacing:-.02em;margin:54px 0 15px}p{margin:0 0 24px}a{color:var(--accent);text-underline-offset:3px}
+    pre{overflow:auto;padding:22px;margin:25px 0;border:1px solid var(--line);border-radius:10px;background:var(--code);font:14px/1.62 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}
+    .callout{padding:18px 21px;border-left:4px solid var(--accent);background:var(--note);margin:28px 0}.callout p:last-child{margin-bottom:0}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}.mermaid{text-align:center;font-family:system-ui,sans-serif}figcaption{color:var(--muted);font-size:.9rem;line-height:1.5;margin-top:16px}
+    ul{padding-left:1.25rem}li{margin:.7rem 0}hr{border:0;border-top:1px solid var(--line);margin:56px 0 28px}.history{font:14px/1.6 system-ui,sans-serif;color:var(--muted);margin:8px 0}
+    @media(max-width:600px){main{padding-top:42px}body{font-size:18px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({startOnLoad:true,theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});
+  </script>
+</head>
+<body>
+<main>
+  <h1>Verzögere das Ergebnis, nicht die Eingabe</h1>
+  <p class="subtitle"><code>useDeferredValue</code> hält das Textfeld unmittelbar und macht nur den langsamen Ergebnisbereich unterbrechbar.</p>
+  <p class="meta">React-Concurrent-Rendering · React 19.3 + TypeScript · Tief · ~8 min</p>
+
+  <p>Die Produktsuche funktioniert korrekt, bis der Katalog einige tausend Zeilen umfasst. Mit jedem Tastendruck rendert React die gefilterte Liste neu. Das Textfeld fühlt sich an, als würde es Buchstaben verschlucken. Der naheliegende Versuch, das kontrollierte Input-Update in eine Transition zu legen, löst jedoch genau die falsche Arbeit vom Nutzerereignis.</p>
+
+  <h2>TL;DR</h2>
+  <p>Der Wert eines kontrollierten Textfelds ist dringend und muss synchron zur Eingabe aktualisiert werden. Übergib stattdessen eine mit <code>useDeferredValue</code> abgeleitete Version der Suchanfrage an den nachweislich langsamen Ergebnis-Teilbaum. React darf dessen Renderarbeit unterbrechen und neu starten. Das macht die Berechnung nicht schneller und reduziert keine Requests; es verändert ihre Priorität.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest kontrollierte Inputs, Renderphasen und Props kennen. Grundlage sind die offiziellen Referenzen zu <a href="https://react.dev/reference/react/useDeferredValue"><code>useDeferredValue</code></a>, <a href="https://react.dev/reference/react/useTransition"><code>useTransition</code></a> und <a href="https://react.dev/reference/react/memo"><code>memo</code></a>. Der Artikel bezieht sich auf <a href="https://react.dev/versions">React 19.3</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>„Deferred“ bedeutet nicht „warte 300 Millisekunden“. React rendert zuerst mit dem bisherigen Wert und startet anschließend sofort einen Hintergrund-Render mit dem neuen Wert. Trifft währenddessen die nächste Eingabe ein, darf React die veraltete Arbeit verwerfen und mit dem neuesten Wert neu beginnen. Die UI besitzt dabei bewusst zwei zeitliche Perspektiven: <code>query</code> beschreibt die aktuelle Eingabe, <code>deferredQuery</code> den Stand, den der Ergebnisbereich gerade darstellen kann.</p>
+  <div class="callout"><p>Concurrent Rendering spart nicht automatisch Arbeit. Es schützt dringende Interaktion davor, auf weniger dringende Renderarbeit warten zu müssen.</p></div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Dieses Beispiel markiert ausgerechnet den State als Transition, der das Textfeld kontrolliert. React dokumentiert ausdrücklich, dass Transition-Updates keine Text-Inputs steuern können.</p>
+  <pre><code>// ProductSearch.tsx – problematische Variante
+import { useState, useTransition } from "react";
+
+export function ProductSearch() {
+  const [query, setQuery] = useState("");
+  const [isPending, startTransition] = useTransition();
+
+  return (
+    &lt;&gt;
+      &lt;input
+        value={query}
+        onChange={(event) =&gt; {
+          startTransition(() =&gt; {
+            setQuery(event.target.value); // kontrolliert das Input
+          });
+        }}
+      /&gt;
+      {isPending &amp;&amp; &lt;span&gt;Aktualisiere…&lt;/span&gt;}
+      &lt;ProductList query={query} /&gt;
+    &lt;/&gt;
+  );
+}</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Das Textfeld muss nach jedem <code>onChange</code> unmittelbar den neuen <code>value</code> erhalten. Eine Transition ist dagegen unterbrechbar und darf später sichtbar werden. Damit kollidieren zwei Verträge: DOM-Eingabe und React-State können vorübergehend auseinanderlaufen. Das Problem ist nicht, dass Transitions „zu langsam“ wären, sondern dass die dringende Zustandsänderung falsch klassifiziert wurde.</p>
+  <p>Auch ein pauschales Debounce löst eine andere Aufgabe. Es wartet absichtlich eine Zeitspanne und kann etwa Request-Frequenz begrenzen. <code>useDeferredValue</code> besitzt laut React-Dokumentation keinen festen Delay und verhindert allein keine zusätzlichen Netzwerkzugriffe.</p>
+
+  <h2>So macht man es richtig – mit Trade-offs</h2>
+  <p>Aktualisiere <code>query</code> normal. Die verzögerte Sicht gehört an die Grenze zum teuren Teilbaum. <code>memo</code> verhindert hier, dass die Liste beim dringenden Render sofort noch einmal mit demselben <code>deferredQuery</code>-Prop arbeitet. Es bleibt eine Optimierung, keine Korrektheitsgarantie.</p>
+  <pre><code>// ProductSearch.tsx
+import { memo, useDeferredValue, useState } from "react";
+
+type Product = { id: string; name: string };
+type Props = { products: readonly Product[] };
+
+const ProductList = memo(function ProductList({
+  products,
+  query,
+}: Props &amp; { query: string }) {
+  const normalized = query.trim().toLocaleLowerCase("de");
+  const visible = products.filter((product) =&gt;
+    product.name.toLocaleLowerCase("de").includes(normalized),
+  );
+
+  return (
+    &lt;ul&gt;
+      {visible.map((product) =&gt; &lt;li key={product.id}&gt;{product.name}&lt;/li&gt;)}
+    &lt;/ul&gt;
+  );
+});
+
+export function ProductSearch({ products }: Props) {
+  const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
+  const isStale = query !== deferredQuery;
+
+  return (
+    &lt;&gt;
+      &lt;label&gt;
+        Produkte suchen
+        &lt;input
+          value={query}
+          onChange={(event) =&gt; setQuery(event.target.value)}
+        /&gt;
+      &lt;/label&gt;
+      &lt;div aria-busy={isStale} style={{ opacity: isStale ? 0.6 : 1 }}&gt;
+        &lt;ProductList products={products} query={deferredQuery} /&gt;
+      &lt;/div&gt;
+    &lt;/&gt;
+  );
+}</code></pre>
+  <p>Der Trade-off ist sichtbare Stale-Time: Kurzzeitig passt die Liste nicht zum Textfeld. Kennzeichne diesen Zustand, statt ihn zu verstecken. Setze das Muster erst ein, wenn React Profiler oder eine reproduzierbare Interaktion den langsamen Renderpfad zeigt. Für Server-Suche kann Debouncing zusätzlich sinnvoll sein; für Suspense-basierte Datenquellen kann der alte Inhalt bis zum neuen Ergebnis sichtbar bleiben.</p>
+
+  <h2>Diagramm</h2>
+  <figure>
+    <div class="mermaid">
+flowchart TD
+  I[Tastendruck] -- dringend --&gt; Q[query und Input aktualisieren]
+  Q -- alter deferredQuery --&gt; O[Alte Liste bleibt sichtbar]
+  Q -- Hintergrund-Render --&gt; N[Neue Liste berechnen]
+  I -. nächste Eingabe unterbricht .-&gt; N
+  N -- Commit --&gt; O
+    </div>
+    <figcaption>Die Eingabe wird sofort committed. Der Listen-Render läuft mit niedrigerer Priorität und kann durch den nächsten Tastendruck verworfen werden; erst ein fertiger Hintergrund-Render ersetzt die sichtbare Liste.</figcaption>
+    <noscript><p>Textalternative: Das Input übernimmt jeden Tastendruck sofort. Die Ergebnisliste behält den alten Wert, bis ein unterbrechbarer Hintergrund-Render mit dem neuesten Wert abgeschlossen ist.</p></noscript>
+  </figure>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Übergib keine im Render neu erzeugten Objekte an <code>useDeferredValue</code>; ihre Identität ändert sich jedes Mal.</li>
+    <li>Teure Arbeit außerhalb des Renderns wird dadurch nicht priorisiert. Verwende dort Debounce, Throttle oder einen Worker.</li>
+    <li>Ein neuer <code>products</code>-Array bei jedem Parent-Render hebt den Nutzen von <code>memo</code> auf.</li>
+    <li>Die Liste muss auch mit einem älteren Suchwert semantisch korrekt und bedienbar bleiben.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Plane zehn Minuten ein. Erzeuge lokal 20.000 Produkte und füge in <code>ProductList</code> vorübergehend eine absichtlich teure, aber reine Schleife ein. Vergleiche im React Profiler zuerst die direkte Query-Weitergabe und danach <code>useDeferredValue</code>. Tippe schnell mehrere Zeichen. Erwartung: Die Gesamtrechenarbeit ist nicht garantiert kleiner, aber das Input übernimmt Zeichen früher; unvollständige Hintergrund-Renderings können verworfen werden. Entferne anschließend die künstliche Last – ohne messbare Verzögerung ist die Optimierung unnötig.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong><code>startTransition</code>:</strong> passend, wenn du die nicht dringende State-Aktualisierung selbst besitzt.</li>
+    <li><strong>Suspense und Caching:</strong> entscheiden, wie alte und noch nicht geladene Ergebnisse koexistieren.</li>
+    <li><strong>Debounce und AbortController:</strong> begrenzen Netzwerkverkehr und verwerfen überholte Requests.</li>
+    <li><strong>React Profiler:</strong> trennt gefühlte Trägheit von tatsächlich teuren Renderpfaden.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://react.dev/versions">React: Versions</a> – aktueller Versionsbezug 19.3.</li>
+    <li><a href="https://react.dev/reference/react/useDeferredValue">React: <code>useDeferredValue</code></a> – Hintergrund-Rendering, Unterbrechbarkeit und Grenzen.</li>
+    <li><a href="https://react.dev/reference/react/useTransition">React: <code>useTransition</code></a> – Priorisierung und Einschränkung für kontrollierte Inputs.</li>
+    <li><a href="https://react.dev/reference/react/memo">React: <code>memo</code></a> – Memoisierung als Performanceoptimierung, nicht als Garantie.</li>
+  </ul>
+
+  <hr>
+  <p class="history">Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 14.10.2026 | Verzögere das Ergebnis, nicht die Eingabe | React-Concurrent-Rendering | Tief;</p>
+  <p class="history">Bereich-Rotation: heute React-Concurrent-Rendering → morgen z. B. Datenzugriff &amp; Caching;</p>
+  <p class="history">Unsicher geblieben: nichts.</p>
+</main>
+</body>
+</html>
