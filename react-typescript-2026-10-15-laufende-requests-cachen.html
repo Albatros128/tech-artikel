@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cache den laufenden Request, nicht erst sein Ergebnis</title>
+  <meta name="description" content="Wie ein Promise-Cache parallele Datenzugriffe dedupliziert und welche Grenzen Invalidierung, Fehler und Abbruchsignale setzen.">
+  <style>
+    :root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#6b6b6b;--line:#dededb;--code:#f3f3f1;--accent:#9a4b25;--note:#fbf1ec}
+    @media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#202321;--accent:#efaa86;--note:#35231c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Georgia,"Times New Roman",serif;font-size:19px;line-height:1.72}
+    main{width:min(720px,calc(100% - 36px));margin:0 auto;padding:72px 0 64px}h1{font-family:system-ui,sans-serif;font-size:clamp(2.3rem,7vw,4.2rem);line-height:1.04;letter-spacing:-.045em;margin:0 0 20px}
+    .subtitle{font-size:1.35rem;line-height:1.45;color:var(--muted);margin:0 0 18px}.meta{font:600 .82rem/1.5 system-ui,sans-serif;letter-spacing:.035em;color:var(--muted);margin-bottom:48px}
+    h2{font-family:system-ui,sans-serif;font-size:1.65rem;line-height:1.22;letter-spacing:-.02em;margin:54px 0 15px}p{margin:0 0 24px}a{color:var(--accent);text-underline-offset:3px}
+    pre{overflow:auto;padding:22px;margin:25px 0;border:1px solid var(--line);border-radius:10px;background:var(--code);font:14px/1.62 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}
+    .callout{padding:18px 21px;border-left:4px solid var(--accent);background:var(--note);margin:28px 0}.callout p:last-child{margin-bottom:0}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}.mermaid{text-align:center;font-family:system-ui,sans-serif}figcaption{color:var(--muted);font-size:.9rem;line-height:1.5;margin-top:16px}
+    ul{padding-left:1.25rem}li{margin:.7rem 0}hr{border:0;border-top:1px solid var(--line);margin:56px 0 28px}.history{font:14px/1.6 system-ui,sans-serif;color:var(--muted);margin:8px 0}
+    @media(max-width:600px){main{padding-top:42px}body{font-size:18px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({startOnLoad:true,theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});
+  </script>
+</head>
+<body>
+<main>
+  <h1>Cache den laufenden Request, nicht erst sein Ergebnis</h1>
+  <p class="subtitle">Wer den Cache erst nach <code>await</code> füllt, lässt parallele Aufrufer durch dieselbe Lücke fallen.</p>
+  <p class="meta">Datenzugriff &amp; Caching · TypeScript 7.0.2 + Fetch API · Tief · ~8 min</p>
+
+  <p>Profilkopf, Berechtigungsleiste und Aktivitätsfeed brauchen denselben Benutzer. Alle drei mounten nahezu gleichzeitig. Obwohl ein Map-Cache existiert, zählt die Telemetrie drei Aufrufe des Loaders. Der Cache ist nicht defekt – er wird nur im falschen Moment befüllt.</p>
+
+  <h2>TL;DR</h2>
+  <p>Speichere bei einem Cache-Miss sofort das laufende Promise unter dem vollständigen Request-Key. Weitere Aufrufer erhalten dasselbe Promise. Ersetze den Eintrag nach Erfolg durch Wert plus Ablaufzeit und entferne ihn nach einem Fehler. So deduplizierst du konkurrierende Aufrufe auf Anwendungsebene. Das ergänzt HTTP-Caching, ersetzt aber weder dessen Validatoren noch eine durchdachte Invalidierungsstrategie.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest Promises, <code>Map</code>, discriminated unions und <a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">Fetch</a> kennen. Der Code verwendet <a href="https://github.com/microsoft/TypeScript/releases/tag/v7.0.2">TypeScript 7.0.2</a>. Für die zweite Cache-Schicht sind der <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching">MDN-Leitfaden zu HTTP-Caching</a> und <a href="https://www.rfc-editor.org/rfc/rfc9111.html">RFC 9111</a> relevant.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Ein Cache-Eintrag muss nicht erst fertige Daten repräsentieren. „Diese Arbeit läuft bereits“ ist ebenfalls ein wertvoller Zustand. Ein Promise ist dafür die natürliche gemeinsame Referenz: Beliebig viele Consumer können dasselbe Ergebnis beobachten, ohne den Loader erneut zu starten.</p>
+  <div class="callout"><p>Request-Deduplizierung beginnt vor dem ersten <code>await</code>. Danach ist das Zeitfenster für parallele Misses bereits offen.</p></div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Der klassische Value-Cache schützt nur spätere Aufrufe. Treffen zwei Aufrufer ein, bevor der erste Loader abgeschlossen ist, sehen beide eine leere Map.</p>
+  <pre><code>// userRepository.ts – problematische Variante
+type User = { id: string; displayName: string };
+
+const values = new Map&lt;string, User&gt;();
+
+export async function getUser(id: string): Promise&lt;User&gt; {
+  const cached = values.get(id);
+  if (cached) return cached;
+
+  const response = await fetch(`/api/users/${encodeURIComponent(id)}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  const user = (await response.json()) as User;
+  values.set(id, user); // zu spät für parallele Aufrufer
+  return user;
+}
+
+await Promise.all([getUser("42"), getUser("42")]);
+// Zwei Loader-Aufrufe sind möglich.</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>JavaScript führt beide Funktionsaufrufe bis zum ersten <code>await</code> aus. Beide prüfen die Map, beide finden keinen Eintrag und beide starten <code>fetch</code>. Erst nach den Responses wird gespeichert. Der Browser-HTTP-Cache kann je nach Headern und Request-Eigenschaften helfen; die Anwendung hat aber keine eigene Deduplizierung garantiert.</p>
+  <p>Zudem erfüllt <code>fetch()</code> sein Promise auch bei HTTP-Statuscodes wie 404. Deshalb muss der Loader <code>response.ok</code> prüfen. Andernfalls kann ein Fehlerbody als scheinbar gültiger Wert im Cache landen.</p>
+
+  <h2>So macht man es richtig – mit Trade-offs</h2>
+  <p>Modelliere Pending und Ready explizit. Der Eintrag wird synchron gesetzt, bevor <code>get</code> zurückkehrt. Die Identitätsprüfung im Fehlerpfad verhindert, dass ein alter, später fehlschlagender Request versehentlich einen neueren Eintrag löscht.</p>
+  <pre><code>// requestCache.ts
+type Entry&lt;T&gt; =
+  | { status: "pending"; promise: Promise&lt;T&gt; }
+  | { status: "ready"; value: T; expiresAt: number };
+
+export class RequestCache&lt;K, T&gt; {
+  private readonly entries = new Map&lt;K, Entry&lt;T&gt;&gt;();
+
+  constructor(
+    private readonly load: (key: K) =&gt; Promise&lt;T&gt;,
+    private readonly ttlMs = 30_000,
+  ) {}
+
+  get(key: K): Promise&lt;T&gt; {
+    const entry = this.entries.get(key);
+
+    if (entry?.status === "pending") return entry.promise;
+    if (entry?.status === "ready" &amp;&amp; entry.expiresAt &gt; Date.now()) {
+      return Promise.resolve(entry.value);
+    }
+
+    const promise = this.load(key)
+      .then((value) =&gt; {
+        this.entries.set(key, {
+          status: "ready",
+          value,
+          expiresAt: Date.now() + this.ttlMs,
+        });
+        return value;
+      })
+      .catch((error: unknown) =&gt; {
+        const current = this.entries.get(key);
+        if (current?.status === "pending" &amp;&amp; current.promise === promise) {
+          this.entries.delete(key);
+        }
+        throw error;
+      });
+
+    this.entries.set(key, { status: "pending", promise });
+    return promise;
+  }
+
+  invalidate(key: K): void {
+    this.entries.delete(key);
+  }
+}</code></pre>
+  <pre><code>// userRepository.ts – Ausschnitt
+type User = { id: string; displayName: string };
+
+const users = new RequestCache&lt;string, User&gt;(async (id) =&gt; {
+  const response = await fetch(`/api/users/${encodeURIComponent(id)}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return (await response.json()) as User;
+});
+
+const [headerUser, feedUser] = await Promise.all([
+  users.get("42"),
+  users.get("42"),
+]); // ein Loader-Aufruf, dasselbe Ergebnis</code></pre>
+  <p>Der Trade-off ist zusätzlicher Lebenszyklus: TTL, manuelle Invalidierung und Fehlerpolitik werden Teil deiner Architektur. Für Server-State mit Mutationen, Refetch-Regeln und Persistenz ist eine etablierte Datenbibliothek meist sinnvoller. Der kleine Cache passt zu begrenzten Read-through-Fällen, deren Schlüssel und Gültigkeit klar sind.</p>
+
+  <h2>Diagramm</h2>
+  <figure>
+    <div class="mermaid">
+flowchart TD
+  A[Aufrufer A] -- get 42 --&gt; E[Pending-Eintrag]
+  B[Aufrufer B] -- get 42 --&gt; E
+  E -- gemeinsames Promise --&gt; L[Loader einmal starten]
+  L -- Erfolg --&gt; R[Ready-Eintrag mit TTL]
+  L -- Fehler --&gt; X[Eintrag entfernen]
+    </div>
+    <figcaption>Der erste Aufrufer erzeugt synchron den Pending-Eintrag. Der zweite hängt sich an dasselbe Promise; erst dessen Ausgang entscheidet über Ready-Zustand oder Eviction.</figcaption>
+    <noscript><p>Textalternative: Beide Aufrufer teilen einen sofort gespeicherten Pending-Eintrag. Erfolg ersetzt ihn durch einen Wert mit TTL, ein Fehler entfernt ihn.</p></noscript>
+  </figure>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Der Key muss URL, Query, relevante Header, Mandant und Berechtigungskontext abbilden. Sonst teilst du falsche Daten.</li>
+    <li>Cache abgelehnte Promises nicht dauerhaft; ein temporärer Fehler würde sonst „kleben“.</li>
+    <li>Ein einzelnes <code>AbortSignal</code> gehört nicht einem Consumer, wenn mehrere denselben Request teilen. Nutze Cache-eigene Abbruchlogik oder Referenzzählung.</li>
+    <li>Eine TTL ist keine fachliche Invalidierung. Nach Mutationen solltest du betroffene Keys gezielt löschen oder aktualisieren.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Plane zehn Minuten ein. Ersetze den Loader durch eine Funktion, die einen Zähler erhöht, 50 Millisekunden wartet und den Key zurückgibt. Starte zehn parallele <code>get("42")</code>-Aufrufe und prüfe: Zähler gleich eins, alle Ergebnisse gleich. Lass den ersten Lauf einmal ablehnen und rufe danach erneut auf. Erwartung: Nach dem Fehler ist der Eintrag entfernt und der Loader startet wieder. Teste zuletzt zwei verschiedene Keys; jetzt muss der Zähler zwei ergeben.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>HTTP-Validatoren:</strong> ETag und <code>If-None-Match</code> vermeiden unnötige Payloads über Prozessgrenzen hinweg.</li>
+    <li><strong>Stale-while-revalidate:</strong> trennt sofortige Anzeige von Hintergrund-Aktualisierung.</li>
+    <li><strong>Abort und Subscriber-Lebenszeit:</strong> gemeinsames Laden braucht eine andere Ownership als komponentenlokale Requests.</li>
+    <li><strong>Runtime-Validierung:</strong> ein gecachter Wert sollte erst nach erfolgreicher Boundary-Prüfung als Domänendaten gelten.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://github.com/microsoft/TypeScript/releases/tag/v7.0.2">Microsoft/TypeScript: Release 7.0.2</a> – aktueller Versionsbezug.</li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">MDN: Using the Fetch API</a> – Promise-Verhalten, Statusprüfung und Abbruch.</li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/ok">MDN: <code>Response.ok</code></a> – Erfolgskriterium für HTTP-Responses.</li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching">MDN: HTTP caching</a> – Browser- und Shared-Cache-Mechanik.</li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9111.html">RFC 9111: HTTP Caching</a> – normative HTTP-Cache-Semantik.</li>
+  </ul>
+
+  <hr>
+  <p class="history">Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 15.10.2026 | Cache den laufenden Request, nicht erst sein Ergebnis | Datenzugriff &amp; Caching | Tief;</p>
+  <p class="history">Bereich-Rotation: heute Datenzugriff &amp; Caching → morgen z. B. TypeScript-API-Modellierung;</p>
+  <p class="history">Unsicher geblieben: nichts.</p>
+</main>
+</body>
+</html>
