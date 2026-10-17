@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein State-Update ist manchmal eine Transformation, kein neuer Wert</title>
+<meta name="description" content="Warum parallele React-Callbacks Ergebnisse verlieren und wie funktionale State-Updater Snapshot und Update-Queue sauber trennen.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315a99}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20242b;--accent:#9bbcf1}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein State-Update ist manchmal eine Transformation, kein neuer Wert</h1>
+<p class="subtitle">Ein asynchroner Handler behält seinen Render-Snapshot. Die Update-Queue muss ihn nicht behalten.</p>
+<p class="meta">React-State &amp; Closures · React 19.3-Dokumentation + TypeScript · Tief · ~7 min</p>
+<p>Du startest zwei Dokumentimporte. Beide melden Erfolg, beide liefern unterschiedliche IDs, im Ergebnisbereich erscheint trotzdem nur ein Dokument. Im Netzwerk gibt es keinen verlorenen Request. Verloren geht ein bereits sichtbares Ergebnis, weil der zweite Callback eine Liste auf Basis eines alten Render-Snapshots ersetzt.</p>
+
+<h2>TL;DR</h2>
+<p>Wenn der nächste State aus dem bisherigen State entstehen soll, übergib dem Setter eine reine Funktion: <code>setCompleted(previous =&gt; [...previous, result])</code>. Übergib einen fertigen Wert, wenn du bewusst ersetzen willst. Der Unterschied ist fachlich: „Ergänze den dann gültigen Zustand“ ist ein anderer Auftrag als „Setze genau diese Liste“.</p>
+
+<h2>Prerequisites</h2>
+<p>Du solltest Closures, Promises und unveränderliche Array-Updates kennen. Die <a href="https://react.dev/versions">offizielle Versionsseite</a> nennt React 19.3; der Artikel bezieht sich auf dessen Dokumentation, nicht auf eine neue API dieser Version. Relevant sind <a href="https://react.dev/learn/state-as-a-snapshot">State as a Snapshot</a> und die <a href="https://react.dev/reference/react/useState"><code>useState</code>-Referenz</a>. Nutze ein bestehendes React-TypeScript-Projekt mit <code>strict</code> und <code>jsx: "react-jsx"</code>; die folgenden TSX-Beispiele benötigen keine weiteren Pakete.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Der Setter ist keine Zuweisung an die Variable deines Handlers. React erzeugt bei jedem Render einen neuen Satz lokaler Werte und Handler. Ein bereits gestarteter Handler arbeitet weiter mit den Werten seines eigenen Renders – auch hinter einem <code>await</code>. Das ist nützlich, wenn du wissen möchtest, welches Dokument der Nutzer beim Start gewählt hatte.</p>
+<p>Meine Designfolgerung: Unterscheide den Startkontext einer Operation von ihrem Zustandsübergang bei Abschluss. Die Dokument-ID darf eingefroren bleiben. Die Ergebnisliste soll dagegen alle inzwischen abgeschlossenen Importe enthalten.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Lege diesen vollständigen Demonstrator in <code>App.tsx</code> ab. Starte beide Importe, bevor der erste fertig ist. Die unterschiedlichen Verzögerungen machen die Abschlussreihenfolge nachvollziehbar; sie simulieren keinen bestimmten Server.</p>
+<pre><code>import { useState } from "react";
+
+type ImportResult = { id: string; title: string };
+
+async function importItem(id: string): Promise&lt;ImportResult&gt; {
+  await new Promise&lt;void&gt;(resolve =&gt;
+    setTimeout(resolve, id === "A" ? 1200 : 600));
+  return { id, title: `Dokument ${id}` };
+}
+
+export default function App() {
+  const [completed, setCompleted] = useState&lt;ImportResult[]&gt;([]);
+
+  async function handleImport(id: string) {
+    const result = await importItem(id);
+    setCompleted([...completed, result]);
+  }
+
+  return (
+    &lt;section aria-label="Dokumentimporte"&gt;
+      &lt;button onClick={() =&gt; void handleImport("A")}&gt;Import A&lt;/button&gt;
+      &lt;button onClick={() =&gt; void handleImport("B")}&gt;Import B&lt;/button&gt;
+      &lt;ul&gt;{completed.map((item, index) =&gt;
+        &lt;li key={`${item.id}-${index}`}&gt;{item.title}&lt;/li&gt;)}&lt;/ul&gt;
+    &lt;/section&gt;
+  );
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Beim Start beider Operationen ist <code>completed</code> leer. B beendet zuerst und setzt die Liste auf <code>[B]</code>. Der dadurch ausgelöste Render erstellt neue Handler, verändert aber den noch laufenden A-Handler nicht. Dieser berechnet später aus seinem alten leeren Array den Wert <code>[A]</code>. Das ist kein paralleler Schreibzugriff zweier JavaScript-Threads, sondern zweimaliges Ersetzen aus veraltetem Wissen.</p>
+<p>Die <a href="https://react.dev/learn/queueing-a-series-of-state-updates">Dokumentation zur Update-Queue</a> unterscheidet Wert-Updates und Updater-Funktionen: Ein Wert ersetzt, eine Funktion berechnet den nächsten Zustand aus dem vorangehenden Queue-Ergebnis. Batching erklärt, wann React Updates zusammen verarbeitet; es macht aus einem alten Snapshot keinen aktuellen Wert. Ein zusätzliches <code>await</code> oder ein anderer Timer behebt die Ursache nicht.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Ersetze ausschließlich den Handler. Typ, Hilfsfunktion, Import und JSX bleiben unverändert. Der Callback schließt weiterhin <code>result</code> ein, liest die Liste aber aus dem Updater-Argument.</p>
+<pre><code>// App.tsx – Ersatz für handleImport
+async function handleImport(id: string) {
+  const result = await importItem(id);
+  setCompleted(previous =&gt; [...previous, result]);
+}</code></pre>
+<p>Damit hängt A an <code>[B]</code> an, statt diese Liste zu überschreiben. Die Abschlussreihenfolge bleibt B, A. Falls die Oberfläche Startreihenfolge verlangt, brauchst du zusätzlich eine beim Start vergebene Sequenz oder vorab angelegte Einträge. Ein funktionaler Updater liefert keine Sortier-, Deduplizierungs- oder Fehlerstrategie.</p>
+<p>Der Updater muss rein bleiben: Kein Request, kein Toast und keine Mutation des bisherigen Arrays gehören hinein. React kann ihn im Entwicklungs-Strict-Mode zur Prüfung erneut ausführen, wie die <a href="https://react.dev/reference/react/useState#my-initializer-or-updater-function-runs-twice">Referenz zu reinen Updatern</a> erklärt. Erzeuge nebenwirkende Dinge vor dem Setter und übergib anschließend das Ergebnis.</p>
+<p>Als Alternative eignet sich ein Reducer, sobald mehrere Ereignisse dieselben Invarianten verändern: gestartet, erfolgreich, fehlgeschlagen, entfernt. Er zentralisiert Übergänge, kostet aber Action-Typen und zusätzliche Struktur. Bei einem einzelnen Append ist der funktionale Setter präziser. Ein fertiger Wert bleibt richtig, wenn du beispielsweise nach einem bewussten Reset die gesamte Ergebnisliste ersetzen möchtest.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  S[Start mit leerer Liste] --&gt; B[B beendet zuerst]
+  B -- Ergänzung --&gt; V[Liste enthält B]
+  V -- A beendet: alter Snapshot --&gt; F[Falsch: nur A]
+  V -- A beendet: Updater --&gt; R[Richtig: B und A]
+</div>
+<figcaption>Beide Operationen starten mit einer leeren Liste. Erst beim Abschluss von A trennen sich die Wege: Der eingefrorene Wert ersetzt B; die Transformation ergänzt den inzwischen vorhandenen Eintrag. Diese Erklärung bleibt ohne Mermaid verfügbar.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Nur das Updater-Argument ist hier der Queue-Zustand. Andere eingefangene Props bleiben Werte des ursprünglichen Renders.</li>
+<li>Ein Updater verhindert keinen Abschluss im falschen Benutzer- oder Projektkontext. Dafür brauchst du eine separate Relevanzentscheidung.</li>
+<li>Mehrfachklicks erzeugen hier absichtlich weitere Einträge. Die Demo identifiziert Listenvorkommen mit ID und Index; bei entfernbaren oder sortierbaren Zeilen brauchst du stabile Vorgangs-IDs.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Plane zehn Minuten ein. Starte A und unmittelbar danach B. Beobachte zuerst B, dann nur A. Ersetze den Handler: Jetzt bleiben B und A erhalten. Starte anschließend A erst nach B-Abschluss; auch die Fehlervariante kann dann korrekt wirken, weil der neue Handler bereits B kennt. Dieser Gegenversuch erklärt, warum der Fehler im manuellen Einzeltest leicht verschwindet.</p>
+<p>Prüfstand: Ein deterministischer Node-Modelltest führt die gezeigten Handler mit kontrollierten Promises aus und bestätigt Verlust beziehungsweise Erhalt beider Ergebnisse. Er ist kein React-Integrationstest. React- und TypeScript-Pakete waren lokal nicht verfügbar; ein TSX-Compile- oder Browser-Verhaltenstest wurde nicht durchgeführt.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Reducer-Invarianten</strong> helfen, wenn mehrere Zustandsfelder gemeinsam wechseln müssen. <strong>Request-Relevanz</strong> entscheidet, ob ein Ergebnis überhaupt noch übernommen werden darf. <strong>Idempotente Ereignisse</strong> verhindern doppelte Einträge bei Wiederholungen, statt nur verlorene Ergänzungen zu vermeiden.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 17.10.2026: <a href="https://react.dev/versions">React-Versionen</a>, <a href="https://react.dev/learn/state-as-a-snapshot">State as a Snapshot</a>, <a href="https://react.dev/learn/queueing-a-series-of-state-updates">Queueing a Series of State Updates</a>, <a href="https://react.dev/reference/react/useState">useState</a>. Die Diagramm-Einbindung folgt dem <a href="https://mermaid.js.org/intro/#mermaid-api">offiziellen Mermaid-CDN-Beispiel</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 17.10.2026 | Ein State-Update ist manchmal eine Transformation, kein neuer Wert | React-State &amp; Closures | Tief;</p>
+<p>Bereich-Rotation: heute React-State &amp; Closures → morgen z. B. Frontend-Tests;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
