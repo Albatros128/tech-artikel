@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein Race-Condition-Test muss die kritische Reihenfolge erzwingen</title>
+<meta name="description" content="Steuerbare Promises machen asynchrone TypeScript-Tests deterministisch und zeigen, ob ein Relevanzschutz wirklich geprüft wird.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#6c448b}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#25212b;--accent:#c2a4e1}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein Race-Condition-Test muss die kritische Reihenfolge erzwingen</h1>
+<p class="subtitle">Warte nicht länger auf asynchronen Code. Entscheide im Test, welche Operation zuerst fertig wird.</p>
+<p class="meta">Frontend-Tests · TypeScript + Node.js 24.19.0 · Tief · ~7 min</p>
+<p>Eine Suche zeigt gelegentlich Ergebnisse der vorherigen Eingabe. Der Regressionstest bleibt grün: Er sucht zuerst nach „alt“, danach nach „neu“ und prüft den letzten Treffer. Dieser Test deckt beide Eingaben ab, aber nicht den Fehler. Er lässt niemals eine alte Antwort nach einer neuen eintreffen.</p>
+
+<h2>TL;DR</h2>
+<p>Injiziere einen Loader, dessen Promises der Test selbst auflöst. Starte beide Anfragen vor dem ersten Abschluss. Lass die neue Antwort zuerst erscheinen und danach die alte. Prüfe sowohl den Zwischenstand als auch die gesamte Veröffentlichungshistorie. So testest du eine festgelegte Ereignisfolge statt eine zufällig günstige Laufzeit.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Promises und Dependency Injection in TypeScript. <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/withResolvers"><code>Promise.withResolvers</code></a> liefert Promise, Resolve- und Reject-Funktion gemeinsam. Die Beispiele verwenden den <a href="https://nodejs.org/docs/latest-v24.x/api/test.html">eingebauten Node-Test-Runner</a> und wurden mit Node 24.19.0 ausgeführt. Speichere die folgenden drei Codeblöcke gemeinsam als <code>search.test.mts</code> und starte <code>node --test search.test.mts</code>.</p>
+<p>Node kann die hier verwendeten löschbaren TypeScript-Typen direkt entfernen. Das ist laut <a href="https://nodejs.org/docs/latest-v24.x/api/typescript.html">Node-Dokumentation</a> keine Typprüfung und berücksichtigt keine <code>tsconfig.json</code>. Ein separates Projekt-Typecheck mit <code>strict</code>, ES2024-Lib und Node-Typdefinitionen bleibt sinnvoll.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Ein Race-Test braucht keine echte Parallelität und keine langsamen Requests. Er braucht zwei noch offene Operationen und die Kontrolle darüber, wann ihre Fortsetzungen laufen. Die entscheidende Aussage lautet nicht „nach 500 Millisekunden stimmt das Ergebnis“, sondern „nach Abschluss der neueren Anfrage darf die ältere nichts mehr veröffentlichen“.</p>
+<p>Meine Designentscheidung ist deshalb eine kleine Testnaht am Loader. Die folgende Suchkoordination ist eine eigenständige, UI-unabhängige Einheit für eine React-Datenzugriffsschicht. Der Generationenzähler implementiert den Vertrag „zuletzt gestartet gewinnt“. Hier wird nur der Erfolgsweg betrachtet; Loader-Fehler werden an den Aufrufer weitergereicht.</p>
+<pre><code>import assert from "node:assert/strict";
+import { test } from "node:test";
+
+function createLatestSearch&lt;T&gt;(
+  load: (query: string) =&gt; Promise&lt;T&gt;,
+  publish: (value: T) =&gt; void,
+) {
+  let generation = 0;
+  return async (query: string): Promise&lt;void&gt; =&gt; {
+    const ownGeneration = ++generation;
+    const result = await load(query);
+    if (ownGeneration === generation) publish(result);
+  };
+}</code></pre>
+
+<h2>So macht man es falsch</h2>
+<p>Als alleiniger Regressionstest ist der Happy Path zu schwach. Die erste Suche ist bereits vollständig beendet, bevor die zweite beginnt. Selbst ohne Generationenprüfung besteht dieser Test. Er ist nicht nutzlos; er beantwortet nur eine andere Frage.</p>
+<pre><code>test("zeigt das neueste Suchergebnis", async () =&gt; {
+  const published: string[] = [];
+  const search = createLatestSearch(
+    async query =&gt; query,
+    value =&gt; published.push(value),
+  );
+
+  await search("alt");
+  await search("neu");
+  assert.equal(published.at(-1), "neu");
+});</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Das erste <code>await</code> entfernt genau die Überlappung, die den Defekt auslöst. Eine grüne Assertion beweist nur, dass zwei sequenzielle Aufrufe funktionieren. Mehr Wiederholungen desselben Ablaufs erzeugen daraus keinen Test für umgekehrte Abschlüsse.</p>
+<p>Auch feste Wartezeiten sind kein Ersatz für die relevante Ordnung. Ein <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/setTimeout">Browser-Timer garantiert keinen exakten Ausführungszeitpunkt</a>. Vor allem aber sagt verstrichene Zeit nichts darüber aus, ob du die gefährliche Reihenfolge überhaupt hergestellt hast. Der Test sollte die Bedingung konstruieren, nicht darauf hoffen.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Jede Anfrage bekommt ein eigenes steuerbares Promise. Der Test löst B auf und wartet auf genau den zugehörigen Suchaufruf. Erst danach löst er A auf. Diese beiden <code>await</code>-Grenzen sorgen dafür, dass die Assertions nach der jeweiligen Verarbeitung laufen.</p>
+<pre><code>test("verwirft eine verspätete ältere Antwort", async () =&gt; {
+  const older = Promise.withResolvers&lt;string&gt;();
+  const newer = Promise.withResolvers&lt;string&gt;();
+  const published: string[] = [];
+  const search = createLatestSearch(
+    query =&gt; {
+      if (query === "alt") return older.promise;
+      if (query === "neu") return newer.promise;
+      throw new Error(`Unerwartete Query: ${query}`);
+    },
+    value =&gt; published.push(value),
+  );
+
+  const a = search("alt");
+  const b = search("neu");
+  assert.deepEqual(published, []);
+
+  newer.resolve("neuer Treffer");
+  await b;
+  assert.deepEqual(published, ["neuer Treffer"]);
+
+  older.resolve("alter Treffer");
+  await a;
+  assert.deepEqual(published, ["neuer Treffer"]);
+});</code></pre>
+<p>Die erste Ergebnisprüfung verhindert einen falschen Erfolg, wenn die Implementierung einfach gar nichts veröffentlicht. Die letzte prüft nicht nur einen Endwert: Die komplette Historie darf keinen alten Treffer enthalten. Das ist der eigentliche beobachtbare Vertrag dieser Einheit.</p>
+<p>Der Trade-off ist eine bewusst kontrollierte Abhängigkeit. Sie belegt weder echte HTTP-Verarbeitung noch React-Rendering oder Cleanup beim Unmount. Dafür isoliert sie die Reihenfolge ohne Netzwerk und ohne Schlafpausen. Als Alternative passen Fake Timer, wenn Debouncing oder Timeouts selbst zum Vertrag gehören. Für reine Promise-Abschlüsse modellieren sie dagegen eine Uhr, die der Test gar nicht benötigt. Ergänzende Integrationstests bleiben für die Verdrahtung zuständig.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+sequenceDiagram
+  participant T as Test
+  participant S as Suchkoordination
+  participant P as Veröffentlichungen
+  T-&gt;&gt;S: A starten, dann B starten
+  T-&gt;&gt;S: B auflösen
+  S-&gt;&gt;P: Neuen Treffer veröffentlichen
+  T-&gt;&gt;P: Zwischenstand prüfen
+  T-&gt;&gt;S: A auflösen
+  Note over S: A ist nicht mehr aktuell
+  T-&gt;&gt;P: Historie bleibt unverändert
+</div>
+<figcaption>Der Test kontrolliert beide Abschlüsse. B muss sichtbar werden; A darf danach keinen weiteren Eintrag erzeugen. Diese Textalternative erklärt denselben Ablauf ohne Diagramm-Rendering.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Warte auf das Promise der öffentlichen Operation, nicht nur auf das aufgelöste Loader-Promise. Die Verarbeitung danach gehört zum Testziel.</li>
+<li>Ein allgemeines „Microtasks leeren“ versteckt oft eine fehlende Completion-Schnittstelle. Mache das Ende der Operation beobachtbar.</li>
+<li>Eine verspätete Ablehnung und das Verlassen der Ansicht brauchen eigene Vertragsentscheidungen und zusätzliche Tests.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten. Führe beide Tests aus. Entferne anschließend nur <code>if (ownGeneration === generation)</code>, sodass jeder Treffer veröffentlicht wird. Erwartung: Der sequenzielle Test bleibt grün; der kontrollierte Test scheitert mit zwei Einträgen. Stelle den Guard wieder her. Diese gezielte Mutation wurde beim Prüfen des Artikels genauso ausgeführt. Die unveränderten Tests bestanden; die Mutation wurde erkannt. Ein separater <code>tsc</code>-Lauf war mangels Compiler nicht möglich.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Mutation Testing</strong> bewertet, ob Tests gezielt eingebaute Defekte erkennen. <strong>React-Integrationstests</strong> prüfen, ob Hooks und Komponenten die getestete Einheit korrekt anbinden. <strong>Debounce-Verträge</strong> benötigen kontrollierte Zeit zusätzlich zur kontrollierten Antwortreihenfolge.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 18.10.2026: <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/withResolvers">MDN: Promise.withResolvers</a>, <a href="https://nodejs.org/docs/latest-v24.x/api/test.html">Node 24: Test Runner</a>, <a href="https://nodejs.org/docs/latest-v24.x/api/typescript.html">Node 24: TypeScript</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/setTimeout">MDN: setTimeout</a>. Diagramm-Einbindung nach dem <a href="https://mermaid.js.org/intro/#mermaid-api">offiziellen Mermaid-CDN-Beispiel</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 18.10.2026 | Ein Race-Condition-Test muss die kritische Reihenfolge erzwingen | Frontend-Tests | Tief;</p>
+<p>Bereich-Rotation: heute Frontend-Tests → morgen z. B. TypeScript-Typsystem;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
