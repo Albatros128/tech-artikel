@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein Conditional Type prüft nicht automatisch die ganze Union</title>
+<meta name="description" content="Warum distributive Conditional Types gemischte Event-Batches ablehnen können und wann eine Union als Ganzes geprüft werden muss.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#375f91}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20252c;--accent:#9cbce9}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein Conditional Type prüft nicht automatisch die ganze Union</h1>
+<p class="subtitle">„Jedes Mitglied einzeln transformieren“ und „alle Mitglieder gemeinsam zulassen“ sind zwei verschiedene Verträge.</p>
+<p class="meta">TypeScript-Typsystem · Conditional Types seit TypeScript 2.8 · Tief · ~7 min</p>
+<p>Dein Frontend bündelt erzeugte und gelöschte Dokumente zu einem Event-Batch. Einzelne Event-Arten funktionieren, doch die gemischte Liste passt plötzlich nicht mehr zum Hilfstyp. Du ergänzt keine Laufzeitprüfung und keinen Cast: Zuerst musst du herausfinden, ob der Typ wirklich einen Batch von Events beschreibt – oder eine Union sortenreiner Batches.</p>
+
+<h2>TL;DR</h2>
+<p>Ein Conditional Type mit einem alleinstehenden Typparameter links von <code>extends</code> verteilt sich über Union-Mitglieder. Aus <code>T[]</code> kann dadurch eine Union mehrerer Array-Typen werden. Willst du die gesamte Union auf Zuweisbarkeit prüfen und anschließend genau ein Array modellieren, verwende <code>[T] extends [Erlaubt]</code>. Entscheide nach dem Vertrag, nicht nach einem reflexhaften Tuple-Trick.</p>
+
+<h2>Prerequisites</h2>
+<p>Du solltest Generics, Unions und <code>never</code> kennen. Die <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-2-8.html#distributive-conditional-types">Release Notes zu TypeScript 2.8</a> beschreiben die Verteilung über einen „naked type parameter“. Das aktuelle <a href="https://www.typescriptlang.org/docs/handbook/2/conditional-types.html#distributive-conditional-types">Handbook zu Conditional Types</a> zeigt auch die nichtdistributive Tuple-Variante. Die folgenden Blöcke gehören gemeinsam in <code>batch.ts</code>; Imports und Runtime-Bibliotheken sind nicht nötig.</p>
+<pre><code>// tsconfig.json – separate Datei
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022"
+  },
+  "files": ["batch.ts"]
+}</code></pre>
+
+<h2>Der Aha-Effekt</h2>
+<p>Eine Union ist hier nicht bloß ein Argument, das einmal in eine Bedingung eingesetzt wird. Bei einem distributiven Hilfstyp wird die Operation für jedes Mitglied ausgewertet; danach werden die Ergebnisse wieder vereinigt. Die Position der Array-Hülle entscheidet deshalb, ob ein Container verschiedene Event-Arten aufnehmen darf oder sich auf eine Art festlegt.</p>
+<p>Meine Designfolgerung: Schreibe vor einem komplexeren Typ-Helfer einen gültigen gemischten Wert und einen unzulässigen Typfall auf. Diese beiden Beispiele zwingen dich, zwischen Transformation einzelner Varianten und einer Bedingung über den Gesamtvertrag zu unterscheiden.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Der Name <code>BrokenBatch</code> soll einen Batch beliebiger erlaubter Events versprechen. Seine Definition liefert aber für jede Event-Art ein eigenes Array. Die Variablen im Beispiel vermeiden, dass Literal-Inferenz den eigentlichen Unterschied verdeckt.</p>
+<pre><code>type Created = { kind: "created"; id: string; title: string };
+type Deleted = { kind: "deleted"; id: string };
+type DomainEvent = Created | Deleted;
+type Internal = { kind: "internal"; diagnostic: string };
+
+type BrokenBatch&lt;T&gt; =
+  T extends DomainEvent ? readonly T[] : never;
+
+const created: Created = { kind: "created", id: "a", title: "Plan" };
+const deleted: Deleted = { kind: "deleted", id: "b" };
+const mixedItems: readonly DomainEvent[] = [created, deleted];
+
+// @ts-expect-error: Der Hilfstyp verlangt sortenreine Arrays.
+const rejected: BrokenBatch&lt;DomainEvent&gt; = mixedItems;
+
+type Unexpected = BrokenBatch&lt;Created | Internal&gt;;
+// readonly Created[] – Internal verschwindet aus dem Ergebnis.</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Für <code>DomainEvent</code> wird die Bedingung separat auf <code>Created</code> und <code>Deleted</code> angewendet. Das Ergebnis lautet <code>readonly Created[] | readonly Deleted[]</code>, nicht <code>readonly (Created | Deleted)[]</code>. Eine Liste mit beiden Varianten erfüllt keinen der beiden sortenreinen Zweige.</p>
+<p>Noch tückischer ist der zweite Typfall: Das erlaubte Mitglied ergibt ein Array, das unerlaubte ergibt <code>never</code>. In der Ergebnisunion bleibt nur der erlaubte Teil übrig. Diese Mechanik ist als Filter sinnvoll; als Prüfung „dieser ganze Typ ist erlaubt“ beantwortet sie die falsche Frage. Das ist ausschließlich eine Typberechnung: Zur Laufzeit wird dadurch kein Objekt aus einer Liste entfernt.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Die Tuple-Hülle verhindert die Verteilung. Jetzt muss der gesamte Eingabetyp zum erlaubten Event-Typ passen; erst danach entsteht das Array. Die Klammern erzeugen kein Runtime-Tuple.</p>
+<pre><code>type Batch&lt;T&gt; =
+  [T] extends [DomainEvent] ? readonly T[] : never;
+
+const accepted: Batch&lt;DomainEvent&gt; = mixedItems;
+
+// @ts-expect-error: Die gesamte Union ist nicht erlaubt.
+const invalid: Batch&lt;Created | Internal&gt; = [created];
+
+// Kleine Typ-Assertions für denselben Vertrag:
+type Same&lt;A, B&gt; =
+  [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type Expect&lt;T extends true&gt; = T;
+
+type MixedIsAllowed = Expect&lt;
+  Same&lt;Batch&lt;DomainEvent&gt;, readonly DomainEvent[]&gt;
+&gt;;
+type InvalidUnionIsRejected = Expect&lt;
+  Same&lt;Batch&lt;Created | Internal&gt;, never&gt;
+&gt;;</code></pre>
+<p>Der Trade-off: Du verlierst bewusst die Filterwirkung. Wenn ein Typ-Helfer exportierbare Varianten aus einer größeren Union auswählen soll, wäre diese Änderung falsch. <a href="https://www.typescriptlang.org/docs/handbook/utility-types.html#extracttype-union"><code>Extract</code></a> beziehungsweise <a href="https://www.typescriptlang.org/docs/handbook/utility-types.html#excludeuniontype-excludedmembers"><code>Exclude</code></a> drücken solche mitgliedsweisen Auswahloperationen bereits aus.</p>
+<p>Für einen einfachen Batch ist sogar eine <a href="https://www.typescriptlang.org/docs/handbook/2/generics.html#generic-constraints">Generic-Constraint</a> klarer. Sie meldet einen unzulässigen Typparameter direkt, statt als Ergebnis <code>never</code> zu liefern:</p>
+<pre><code>// Alternative, wenn kein bedingtes Ergebnis benötigt wird:
+type DirectBatch&lt;T extends DomainEvent&gt; = readonly T[];
+const direct: DirectBatch&lt;DomainEvent&gt; = mixedItems;
+
+// @ts-expect-error: Internal verletzt die Constraint.
+type InvalidDirect = DirectBatch&lt;Created | Internal&gt;;</code></pre>
+<p>Die Conditional-Variante lohnt sich vor allem beim Zusammensetzen von Typfunktionen, die mit einem <code>never</code>-Ergebnis weiterrechnen. An einer öffentlichen API ist ein früher Constraint-Fehler oft verständlicher. Keine Variante ersetzt die Validierung unbekannter JSON-Events.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  U[Union: Created oder Deleted] -- nacktes T --&gt; D[Mitglieder getrennt prüfen]
+  D --&gt; S[Created-Array oder Deleted-Array]
+  U -- Tuple-Hülle --&gt; W[Gesamte Union prüfen]
+  W --&gt; M[Ein Array mit beiden Event-Arten]
+</div>
+<figcaption>Die linke Berechnung verteilt vor dem Aufbau der Arrays. Die rechte prüft zuerst den Gesamttyp und baut anschließend einen gemeinsamen Container. Diese Erklärung bleibt ohne Mermaid verfügbar.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Die Verteilung hängt vom alleinstehenden Typparameter ab. Eine ausgeschriebene konkrete Union links von <code>extends</code> verteilt sich nicht automatisch.</li>
+<li><code>never</code> verdient einen eigenen Test: Die distributive Variante ergibt hier <code>never</code>, die gezeigte nichtdistributive Variante <code>readonly never[]</code>.</li>
+<li>Die gezeigten Typ-Assertions sind für diese konkreten Typen gedacht, kein universeller Gleichheitstest für <code>any</code> und alle TypeScript-Sonderfälle.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Plane zehn Minuten im TypeScript Playground mit <code>strict</code> ein. Vergleiche die Typanzeigen beider Batch-Helfer. Entferne die <code>@ts-expect-error</code>-Kommentare einzeln: Erwartet sind Fehler am gemischten BrokenBatch und an den beiden unzulässigen Gesamtverträgen. Ergänze danach <code>Batch&lt;never&gt;</code> und entscheide ausdrücklich, ob ein leerer Array-Typ in deiner Typfunktion sinnvoll ist.</p>
+<p>Prüfstand: HTML-Struktur und Beispielaufbau wurden kontrolliert. Lokal war kein TypeScript-Compiler verfügbar; die angegebenen Typ-Assertions wurden deshalb nicht als bestandener Compile-Test gewertet. Ein Laufzeittest könnte diese rein statische Unterscheidung nicht bestätigen.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Union-Filter</strong> nutzen die Verteilung absichtlich, um Varianten auszuwählen. <strong>API-Fehlermeldungen</strong> entscheiden, ob ein Constraint oder ein <code>never</code>-Ergebnis Verbrauchern besser hilft. <strong>Exhaustive Checks</strong> geben <code>never</code> eine andere Aufgabe: unerreichbare Restfälle sichtbar machen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 19.10.2026: <a href="https://www.typescriptlang.org/docs/handbook/2/conditional-types.html#distributive-conditional-types">Handbook: Distributive Conditional Types</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-2-8.html#distributive-conditional-types">TypeScript 2.8 Release Notes</a>, <a href="https://www.typescriptlang.org/docs/handbook/utility-types.html">Utility Types: Extract und Exclude</a>, <a href="https://www.typescriptlang.org/docs/handbook/2/generics.html#generic-constraints">Generic Constraints</a>. Diagramm-Einbindung nach dem <a href="https://mermaid.js.org/intro/#mermaid-api">offiziellen Mermaid-CDN-Beispiel</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 19.10.2026 | Ein Conditional Type prüft nicht automatisch die ganze Union | TypeScript-Typsystem | Tief;</p>
+<p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. React-Effects;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
