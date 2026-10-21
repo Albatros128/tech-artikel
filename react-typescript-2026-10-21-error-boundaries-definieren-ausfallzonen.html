@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Wie die Position von React Error Boundaries fachliche Ausfallzonen definiert und unabhängige Bereiche einer Oberfläche verfügbar hält.">
+  <title>Error Boundaries definieren Ausfallzonen</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f6f2;
+      --surface: #ffffff;
+      --text: #202124;
+      --muted: #667085;
+      --border: #dedbd3;
+      --accent: #3157c8;
+      --code-bg: #171a21;
+      --code-text: #edf1f7;
+      --note: #f1f4ff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1217;
+        --surface: #171b22;
+        --text: #e8ecf2;
+        --muted: #aab4c3;
+        --border: #343b48;
+        --accent: #9ab0ff;
+        --note: #1c2438;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 1.12rem;
+      line-height: 1.72;
+    }
+    article {
+      width: min(760px, calc(100% - 32px));
+      margin: 56px auto;
+      padding: clamp(24px, 5vw, 64px);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+    }
+    header { margin-bottom: 3rem; }
+    .eyebrow, .meta, figcaption, .caption, footer {
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+    .eyebrow {
+      color: var(--accent);
+      font-size: .78rem;
+      font-weight: 750;
+      letter-spacing: .12em;
+    }
+    h1, h2 {
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      line-height: 1.12;
+      letter-spacing: -.025em;
+    }
+    h1 { margin: .5rem 0 1rem; font-size: clamp(2.35rem, 7vw, 4.4rem); }
+    h2 { margin: 3.2rem 0 1rem; font-size: clamp(1.55rem, 4vw, 2.1rem); }
+    .subtitle { font-size: 1.35rem; line-height: 1.48; color: var(--muted); }
+    .meta { font-size: .92rem; color: var(--muted); }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .88em; }
+    :not(pre) > code { padding: .12em .3em; border: 1px solid var(--border); border-radius: .3em; }
+    figure { margin: 2rem 0; }
+    figcaption { margin-bottom: .55rem; color: var(--muted); font-size: .88rem; }
+    pre {
+      overflow-x: auto;
+      margin: 0;
+      padding: 1.25rem;
+      border-radius: 12px;
+      background: var(--code-bg);
+      color: var(--code-text);
+      line-height: 1.55;
+      tab-size: 2;
+    }
+    .diagram { margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; }
+    .diagram pre { background: transparent; color: var(--text); }
+    .caption, .note { color: var(--muted); font-size: .95rem; }
+    .note { padding: 1rem 1.2rem; background: var(--note); border-left: 4px solid var(--accent); }
+    li { margin: .55rem 0; }
+    hr { margin: 3.5rem 0 1.5rem; border: 0; border-top: 1px solid var(--border); }
+    footer p { margin: .45rem 0; font-size: .9rem; color: var(--muted); }
+    @media (max-width: 560px) {
+      body { font-size: 1.04rem; }
+      article { margin: 0 auto; width: 100%; border: 0; border-radius: 0; }
+    }
+  </style>
+</head>
+<body>
+<article>
+  <header>
+    <p class="eyebrow">FRONTEND-ARCHITEKTUR / REACT</p>
+    <h1>Error Boundaries definieren Ausfallzonen</h1>
+    <p class="subtitle">Die richtige Boundary sitzt dort, wo ein Fehler fachlich isoliert werden kann – nicht automatisch nur am Root und nicht um jedes kleine Element.</p>
+    <p class="meta">21.10.2026 · Frontend-Architektur · React 19.3 · Tief · ~8 min</p>
+  </header>
+
+  <p>Ein einzelnes Umsatzdiagramm erhält unerwartete Daten und wirft beim Rendern. Statt nur dieses Panel zu ersetzen, verschwindet das gesamte Dashboard: Navigation, Aktivitätsfeed und alle weiterhin nutzbaren Aktionen. Die Anwendung besitzt zwar eine Error Boundary – aber sie sitzt ausschließlich am Root.</p>
+  <p>Das ist kein fehlender Fehlerhandler. Es ist eine zu grob gewählte Ausfallzone.</p>
+
+  <h2>TL;DR</h2>
+  <p>Ein Renderfehler wandert im Komponentenbaum nach oben bis zur nächsten Error Boundary. Deren Position bestimmt deshalb, welcher Teil der Oberfläche durch einen Fallback ersetzt wird. Behalte eine Root-Boundary als letzte Sicherung und ergänze fachliche Boundaries um unabhängige Bereiche, die getrennt ausfallen und sinnvoll separat wiederholt werden können.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest Reacts <a href="https://react.dev/learn/render-and-commit">Render- und Commit-Modell</a>, Klassenkomponenten auf Lesebene und die offizielle Referenz zu <a href="https://react.dev/reference/react/Component#catching-rendering-errors-with-an-error-boundary">Error Boundaries</a> kennen. Der Versionsbezug ist <a href="https://react.dev/versions">React 19.3</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Eine Boundary ist weniger ein technischer <code>try/catch</code>-Ersatz als eine architektonische Grenze. React entfernt bei einem ungefangenen Renderfehler standardmäßig die betroffene UI. Eine Boundary fängt Fehler ihrer Nachkommen ab und rendert stattdessen ihren Fallback. Damit beantwortet ihre Position eine Produktfrage: Welche Funktionen dürfen gemeinsam verschwinden?</p>
+  <p>Das lässt sich nicht allein aus der Komponentengröße ableiten. Zwei kleine Widgets können fachlich voneinander unabhängig sein; mehrere große Komponenten können gemeinsam eine unteilbare Checkout-Strecke bilden. Die sinnvolle Granularität folgt der Wiederherstellbarkeit und dem Nutzen des verbleibenden UI.</p>
+
+  <h2>So macht man es falsch</h2>
+  <p>Eine Root-Boundary ist wichtig, aber als einzige Grenze macht sie jeden Renderfehler zu einem Totalausfall:</p>
+
+  <figure>
+    <figcaption>Fehlervariante · nur eine globale Ausfallzone</figcaption>
+    <pre><code>import { createRoot } from &quot;react-dom/client&quot;;
+import { ErrorBoundary } from &quot;./ErrorBoundary&quot;;
+import { ActivityPanel, Navigation, RevenuePanel } from &quot;./dashboard-parts&quot;;
+
+function App() {
+  return &lt;&gt;
+    &lt;Navigation /&gt;
+    &lt;RevenuePanel /&gt;
+    &lt;ActivityPanel /&gt;
+  &lt;/&gt;;
+}
+
+function FatalPage() {
+  return &lt;main role=&quot;alert&quot;&gt;Die Anwendung ist ausgefallen.&lt;/main&gt;;
+}
+
+createRoot(document.getElementById(&quot;root&quot;)!).render(
+  &lt;ErrorBoundary fallback={&lt;FatalPage /&gt;}&gt;
+    &lt;App /&gt;
+  &lt;/ErrorBoundary&gt;,
+);</code></pre>
+  </figure>
+
+  <p>Wirft <code>RevenuePanel</code> beim Rendern, ist die Root-Boundary der nächste Fänger. Ihr Fallback ersetzt folglich auch Navigation und Aktivitätsfeed. Ein <code>try/catch</code> direkt um <code>&lt;RevenuePanel /&gt;</code> hilft nicht: React rendert das Kind später; Renderfehler laufen durch den Komponentenbaum, wie auch die offizielle <a href="https://react.dev/reference/eslint-plugin-react-hooks/lints/error-boundaries">Lint-Dokumentation</a> erklärt.</p>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Die Mechanik ist hier wichtiger als die Syntax. JSX erzeugt zunächst nur eine Beschreibung. Der Funktionsaufruf des Kindes findet nicht innerhalb des lexikalischen <code>try</code>-Blocks des Parents statt. React übernimmt die Ausführung und propagiert den Fehler zur nächsten Boundary. Diese ist damit die Einheit, die atomar zwischen normaler UI und Fallback wechselt.</p>
+  <p>Eine globale Boundary schützt vor einer leeren Seite, erhält aber keine Teilfunktion. Umgekehrt erzeugt eine Boundary um jeden Avatar oder Button unruhige Mikro-Fallbacks, mehr Zustände und unklare Wiederholungslogik. React empfiehlt ausdrücklich Grenzen an Stellen, an denen eine Fehlermeldung sinnvoll angezeigt werden kann – nicht pauschal um jede Komponente.</p>
+
+  <h2>So macht man es richtig mit Trade-offs</h2>
+  <p>Behalte die Root-Boundary für unbekannte Fehler. Ergänze darunter Grenzen für fachlich unabhängige Panels. Eine wiederverwendbare Boundary kann Fehler protokollieren und über einen wechselnden <code>resetKey</code> einen neuen Versuch zulassen:</p>
+
+  <figure>
+    <figcaption>Verbesserung · Boundary mit explizitem Wiederholungsvertrag</figcaption>
+    <pre><code>import { Component, type ErrorInfo, type ReactNode } from &quot;react&quot;;
+import { reportRenderError } from &quot;./observability&quot;;
+
+type Props = {
+  area: string;
+  resetKey: number;
+  onRetry: () =&gt; void;
+  children: ReactNode;
+};
+type State = { error: Error | null };
+
+export class FeatureBoundary extends Component&lt;Props, State&gt; {
+  state: State = { error: null };
+
+  static getDerivedStateFromError(value: unknown): State {
+    return { error: value instanceof Error ? value : new Error(String(value)) };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    reportRenderError(this.props.area, error, info.componentStack);
+  }
+
+  componentDidUpdate(previous: Props) {
+    if (this.state.error &amp;&amp; previous.resetKey !== this.props.resetKey) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return &lt;section role=&quot;alert&quot;&gt;
+        &lt;p&gt;Dieser Bereich konnte nicht angezeigt werden.&lt;/p&gt;
+        &lt;button type=&quot;button&quot; onClick={this.props.onRetry}&gt;
+          Erneut versuchen
+        &lt;/button&gt;
+      &lt;/section&gt;;
+    }
+    return this.props.children;
+  }
+}</code></pre>
+  </figure>
+
+  <figure>
+    <figcaption>Dashboard.tsx · unabhängige Panels, unabhängige Ausfallzonen</figcaption>
+    <pre><code>import { useState, type ReactNode } from &quot;react&quot;;
+import { FeatureBoundary } from &quot;./FeatureBoundary&quot;;
+import { ActivityPanel, Navigation, RevenuePanel } from &quot;./dashboard-parts&quot;;
+
+type IsolatedPanelProps = {
+  area: string;
+  render: (attempt: number) =&gt; ReactNode;
+};
+
+function IsolatedPanel({ area, render }: IsolatedPanelProps) {
+  const [attempt, setAttempt] = useState(0);
+
+  return &lt;FeatureBoundary
+    area={area}
+    resetKey={attempt}
+    onRetry={() =&gt; setAttempt(value =&gt; value + 1)}
+  &gt;
+    {render(attempt)}
+  &lt;/FeatureBoundary&gt;;
+}
+
+export function Dashboard() {
+  return &lt;&gt;
+    &lt;Navigation /&gt;
+    &lt;IsolatedPanel area=&quot;revenue&quot; render={attempt =&gt;
+      &lt;RevenuePanel key={attempt} /&gt;
+    } /&gt;
+    &lt;IsolatedPanel area=&quot;activity&quot; render={attempt =&gt;
+      &lt;ActivityPanel key={attempt} /&gt;
+    } /&gt;
+  &lt;/&gt;;
+}</code></pre>
+  </figure>
+
+  <p>Der Preis sind zusätzliche Fallback-Zustände, Logging-Kontext und eine bewusste Retry-Semantik. Ein Retry ohne geänderte Eingabe wiederholt nur denselben deterministischen Fehler. Alternativ kann ein Router Error Boundaries pro Route bereitstellen; für stark verschachtelte Anwendungen reduziert das eigenen Infrastrukturcode, bindet die Fehlergrenzen aber an die Routing-Struktur.</p>
+
+  <h2>Diagramm</h2>
+  <div class="diagram">
+    <pre class="mermaid">flowchart TD
+  A[Root-Boundary] --&gt; B[Navigation]
+  A --&gt; C[Dashboard]
+  C --&gt; D[Umsatz-Boundary]
+  C --&gt; E[Aktivitäts-Boundary]
+  D --&gt; F[Umsatz-Panel]
+  E --&gt; G[Aktivitäts-Panel]
+  F -. Renderfehler .-&gt; D</pre>
+  </div>
+  <p class="caption">Der Fehler des Umsatz-Panels endet an seiner nächsten Boundary. Deren Fallback ersetzt nur diesen Teilbaum; Navigation und Aktivitätsbereich bleiben erhalten. Ohne die innere Grenze würde der Fehler bis zur Root-Boundary weiterlaufen.</p>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><strong>Falsche Fehlerklasse:</strong> Klassische Error Boundaries fangen keine Fehler aus Event-Handlern, Server Rendering oder beliebigem asynchronem Code wie <code>setTimeout</code>. Diese Pfade brauchen eigene Behandlung.</li>
+    <li><strong>Boundary wirft selbst:</strong> Fehler im eigenen Fallback werden erst von einer weiter oben liegenden Boundary gefangen.</li>
+    <li><strong>Logging ohne Kontext:</strong> Protokolliere Bereich und Component Stack, aber zeige Nutzern keine internen Fehlermeldungen oder sensiblen Payloads.</li>
+    <li><strong>Funktionskomponenten:</strong> React 19.3 bietet weiterhin keine eingebaute Möglichkeit, eine Error Boundary als Funktionskomponente zu definieren; eine kleine Klasse oder eine etablierte Bibliothek ist die Alternative.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Baue in zehn Minuten ein Dashboard mit zwei Panels und einem Schalter, der im Umsatz-Panel während des Renderns <code>throw new Error(&quot;invalid revenue&quot;)</code> ausführt. Teste zuerst nur mit der Root-Boundary und danach mit der zusätzlichen Panel-Boundary. Erwartete Beobachtung: Im ersten Fall verschwindet die gesamte App hinter dem globalen Fallback; im zweiten bleiben Navigation und Aktivitätsfeed bedienbar. Entferne danach die Panel-Boundary wieder – dieser kleine Mutationstest zeigt, ob dein Test wirklich die Ausfallzone absichert.</p>
+  <p class="note">Die TSX-Beispiele wurden strukturell geprüft, aber nicht als React-Integrationstest ausgeführt, weil in der Laufzeit keine React-/TypeScript-Toolchain installiert war.</p>
+
+  <h2>Verwandte Themen</h2>
+  <p><strong>Suspense-Grenzen</strong> definieren Lade- statt Fehlerzonen und sollten oft ähnlich fachlich geschnitten werden. <strong>Route-Level Recovery</strong> verbindet URL-Segmente mit eigenen Fallbacks. <strong>Observability</strong> macht aus <code>componentDidCatch</code> ein verwertbares Signal. <strong>Mutation Testing</strong> prüft, ob ein Test die Boundary-Platzierung tatsächlich schützt. <strong>Progressive Degradation</strong> fragt allgemeiner, welche Kernfunktion trotz Teilfehler verfügbar bleiben muss.</p>
+
+  <h2>Quellen</h2>
+  <ol>
+    <li><a href="https://react.dev/reference/react/Component#catching-rendering-errors-with-an-error-boundary">React: Catching rendering errors with an Error Boundary</a> – Verhalten, Grenzen, Granularität und Klassenimplementierung.</li>
+    <li><a href="https://react.dev/reference/eslint-plugin-react-hooks/lints/error-boundaries">React: error-boundaries lint</a> – warum <code>try/catch</code> Renderfehler von Kindkomponenten nicht abfängt.</li>
+    <li><a href="https://react.dev/versions">React Versions</a> – verifizierter Versionsbezug React 19.3.</li>
+    <li><a href="https://mermaid.js.org/intro/getting-started">Mermaid User Guide</a> – offizielle Einbindung und Initialisierung des Diagramms.</li>
+  </ol>
+
+  <hr>
+  <footer>
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 21.10.2026 | Error Boundaries definieren Ausfallzonen | Frontend-Architektur | Tief;</p>
+    <p>Bereich-Rotation: heute Frontend-Architektur → morgen z. B. TypeScript-Typsystem;</p>
+    <p>Unsicher geblieben: nichts.</p>
+  </footer>
+</article>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
+</script>
+</body>
+</html>
