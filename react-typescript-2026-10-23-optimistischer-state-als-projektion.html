@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Optimistischer State ist eine Projektion, keine zweite Wahrheit</title>
+<meta name="description" content="Warum Snapshot-Rollbacks bei überlappenden React-Mutationen Daten verlieren können und wie useOptimistic bestätigten und vorläufigen State trennt.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Optimistischer State ist eine Projektion, keine zweite Wahrheit</h1>
+<p class="subtitle">Ein Rollback auf einen alten Array-Snapshot wirkt sicher – bis zwei Mutationen gleichzeitig laufen.</p>
+<p class="meta">23.10.2026 · React-State-Modellierung · React 19.3 · Tief · ~8 min</p>
+<p>Du legst zwei Aufgaben schnell hintereinander an. Die zweite Anfrage gelingt, die erste scheitert. Trotzdem verschwindet anschließend auch die erfolgreiche Aufgabe aus der Liste. Der Server kennt sie, erst ein Reload bringt sie zurück. Das Problem ist nicht „Optimistic UI“ an sich, sondern ein State-Modell, das vorläufige und bestätigte Daten in demselben veränderlichen Verlauf vermischt.</p>
+
+<h2>TL;DR</h2>
+<p>Behandle bestätigten Serverzustand als Basis und optimistische Änderungen als temporäre Projektion darüber. Ein Snapshot-Rollback kann neuere Erfolge überschreiben. <a href="https://react.dev/reference/react/useOptimistic"><code>useOptimistic</code></a> modelliert stattdessen die sichtbare Variante während einer Action; endet sie mit einem Fehler, fällt die Ansicht auf den dann aktuellen bestätigten Wert zurück. Das ersetzt keine Cache- oder Konfliktstrategie, macht aber die Besitzverhältnisse im lokalen State explizit.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Hooks, funktionale Updater und asynchrone Formularaktionen. Die <a href="https://react.dev/versions">offizielle Versionsseite</a> führt React 19.3. Relevant sind die Referenzen zu <a href="https://react.dev/reference/react/useOptimistic"><code>useOptimistic</code></a> und zu <a href="https://react.dev/reference/react-dom/components/form">React-Formularaktionen</a>. Das Beispiel setzt ein React-TypeScript-Projekt mit <code>strict</code>, DOM-Typen und einer Funktion <code>createTodo</code> voraus, die entweder das gespeicherte Todo liefert oder einen Fehler wirft.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Optimistischer State ist kein zweiter Datenspeicher. Er beantwortet eine engere Frage: „Wie sähe die bestätigte Basis aus, wenn diese noch laufenden Absichten bereits gelungen wären?“ Daraus folgt eine andere Rollback-Semantik. Bei einem Fehler stellst du keinen alten Gesamtzustand wieder her; du entfernst nur die fehlgeschlagene Absicht aus der Projektion.</p>
+<p>React beschreibt <code>useOptimistic(value, updateFn)</code> genau in diesen Begriffen: Ohne laufende Action entspricht der Rückgabewert der Basis. Während einer Action entsteht er durch die reine Update-Funktion. Der entscheidende Architekturgewinn liegt daher weniger in einer kurzen Hook-API als in der Trennung zwischen bestätigtem Besitz und vorläufiger Darstellung.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die folgende Variante ist realistisch: Sie zeigt sofort eine Zeile und merkt sich für den Fehlerfall den bisherigen Array-Wert.</p>
+<pre><code>import { useState } from "react";
+import { createTodo } from "./todo-api";
+
+type Todo = { id: string; title: string; pending?: boolean };
+
+export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
+  const [todos, setTodos] = useState(initialTodos);
+  const [error, setError] = useState&lt;string | null&gt;(null);
+
+  async function add(title: string) {
+    const snapshot = todos;
+    const temporary = {
+      id: crypto.randomUUID(), title, pending: true
+    };
+    setTodos([...todos, temporary]);
+
+    try {
+      const saved = await createTodo({ title });
+      setTodos(current =&gt;
+        current.map(todo =&gt; todo.id === temporary.id ? saved : todo)
+      );
+    } catch {
+      setTodos(snapshot);
+      setError("Aufgabe konnte nicht gespeichert werden.");
+    }
+  }
+
+  // Formular und Liste verwenden add() beziehungsweise todos.
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Angenommen, Action A merkt sich <code>[Alt]</code> und fügt „A“ vorläufig hinzu. Action B startet danach mit <code>[Alt, A?]</code>. B gelingt und ersetzt ihre temporäre Zeile durch „B“. Wenn A später scheitert, schreibt ihr Catch-Block trotzdem den älteren Snapshot <code>[Alt]</code>. Damit löscht er den Erfolg von B aus dem lokalen State.</p>
+<p>Funktionale Updater in den Erfolgszweigen beheben das nicht. Das Problem liegt im Rollback: Ein kompletter Snapshot trägt keine Information darüber, welche Änderung rückgängig gemacht werden soll. Beobachtbar sind verschwundene Erfolge, ein UI, das vom Server abweicht, und Fehler, die nur bei bestimmter Antwortreihenfolge auftreten. Eine künstliche Serialisierung würde den Fehler vermeiden, aber auch unabhängige Eingaben unnötig blockieren.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Halte die vom Server bestätigten Einträge separat. Die Action ergänzt nur die optimistische Projektion. Weil sie als <code>action</code> des Formulars läuft, darf sie den optimistischen Setter aufrufen. Laut React muss dessen Update-Funktion rein sein.</p>
+<pre><code>import { useOptimistic, useState } from "react";
+import { createTodo } from "./todo-api";
+
+type Todo = { id: string; title: string };
+type VisibleTodo = Todo &amp; { pending: boolean };
+type AddTodo = { clientId: string; title: string };
+type Props = { initialTodos: Todo[] };
+
+function projectTodo(
+  current: VisibleTodo[],
+  addition: AddTodo
+): VisibleTodo[] {
+  return [
+    ...current,
+    { id: addition.clientId, title: addition.title, pending: true }
+  ];
+}
+
+export function TodoList({ initialTodos }: Props) {
+  const [confirmed, setConfirmed] = useState&lt;VisibleTodo[]&gt;(
+    initialTodos.map(todo =&gt; ({ ...todo, pending: false }))
+  );
+  const [visible, addOptimistic] = useOptimistic(
+    confirmed,
+    projectTodo
+  );
+  const [error, setError] = useState&lt;string | null&gt;(null);
+
+  async function submit(formData: FormData) {
+    const title = String(formData.get("title") ?? "").trim();
+    if (!title) return;
+
+    const clientId = crypto.randomUUID();
+    setError(null);
+    addOptimistic({ clientId, title });
+
+    try {
+      const saved = await createTodo({ title });
+      setConfirmed(current =&gt; [
+        ...current,
+        { ...saved, pending: false }
+      ]);
+    } catch {
+      setError("Aufgabe konnte nicht gespeichert werden.");
+    }
+  }
+
+  return (
+    &lt;&gt;
+      &lt;form action={submit}&gt;
+        &lt;label&gt;Neue Aufgabe &lt;input name="title" required /&gt;&lt;/label&gt;
+        &lt;button type="submit"&gt;Anlegen&lt;/button&gt;
+      &lt;/form&gt;
+      {error &amp;&amp; &lt;p role="alert"&gt;{error}&lt;/p&gt;}
+      &lt;ul&gt;
+        {visible.map(todo =&gt; (
+          &lt;li key={todo.id} aria-busy={todo.pending}&gt;
+            {todo.title}{todo.pending ? " – wird gespeichert" : ""}
+          &lt;/li&gt;
+        ))}
+      &lt;/ul&gt;
+    &lt;/&gt;
+  );
+}</code></pre>
+<p>Gelingt die Anfrage, erweitert sie die Basis. Scheitert sie, endet die Action; React zeigt wieder die zu diesem Zeitpunkt aktuelle Basis, in der parallele Erfolge bereits enthalten sein können. Der Preis ist, dass du bestätigte Daten weiterhin korrekt fortschreiben und Fehler sichtbar machen musst. Außerdem kann eine serverseitig vergebene ID dazu führen, dass die vorläufige Zeile durch eine neue bestätigte Zeile ersetzt wird.</p>
+<p>Als Alternative bietet sich eine Daten- oder Cache-Bibliothek mit optimistischen Mutationen an, sobald mehrere Komponenten dieselben Entitäten lesen, Invalidierung nötig ist oder Offline-Warteschlangen entstehen. Sie zentralisiert Abgleich und Rollback, bringt aber eigene Cache-Schlüssel, Lebenszyklen und Fehlerregeln mit. Für einen lokal besessenen Formular-State ist die Projektion oft die kleinere Abstraktion.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Bestätigter State] --&gt; C[Reine Projektion]
+  B[Laufende Actions] --&gt; C
+  C --&gt; D[Sichtbare Liste]
+  B -- Erfolg --&gt; A
+  B -- Fehler --&gt; E[Action endet]
+  E --&gt; A
+</div>
+<figcaption>Die sichtbare Liste entsteht aus Basis und laufenden Absichten. Ein Erfolg verändert die Basis; ein Fehler beendet nur seine Action. Es wird kein früherer Gesamt-Snapshot zurückgeschrieben. Diese Erklärung bleibt auch ohne gerendertes Diagramm vollständig.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Rufe den optimistischen Setter innerhalb einer Action auf, etwa über eine Formular-Action oder <code>startTransition</code>. Außerhalb warnt React und der optimistische Zustand kann nur kurz erscheinen.</li>
+<li>Die Projektionsfunktion darf weder IDs erzeugen noch Requests starten. Solche Seiteneffekte gehören vor ihren Aufruf beziehungsweise in die Action.</li>
+<li>Ein Erfolg braucht weiterhin eine fachliche Konfliktregel. Wenn der Server Titel normalisiert oder Duplikate zusammenführt, ist seine Antwort maßgeblich.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten und verzögere zwei <code>createTodo</code>-Aufrufe gezielt. Lass B nach 100 Millisekunden gelingen und A nach 500 Millisekunden scheitern. Erwartung bei der Snapshot-Variante: B verschwindet lokal. Erwartung bei der Projektionsvariante: Während beide laufen sind A und B sichtbar; nach den Antworten verschwindet nur A, B bleibt als bestätigter Eintrag stehen. Kehre danach die Reihenfolge um und prüfe denselben Invariant.</p>
+<p>Prüfstand: Die beschriebene Reihenfolge wurde mit einem ausführbaren Zustandsmodell geprüft. Es bestätigt die Rollback-Kausalität, ersetzt aber keinen Browser- oder React-Integrationstest. Der TSX-Ausschnitt wurde in dieser Umgebung nicht kompiliert; ein bestandener Compile-Test wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Idempotente Mutationen</strong> verhindern doppelte Servereinträge bei Wiederholungen. <strong>Client-generierte Korrelations-IDs</strong> verbinden vorläufige und bestätigte Entitäten. <strong>Cache-Invalidierung</strong> wird relevant, sobald mehrere Leser dieselbe Basis besitzen. <strong>Property-basierte Tests</strong> können unterschiedliche Abschlussreihenfolgen systematisch gegen den Invariant prüfen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 23.10.2026: <a href="https://react.dev/versions">React-Versionen</a>, <a href="https://react.dev/reference/react/useOptimistic">useOptimistic</a>, <a href="https://react.dev/reference/react-dom/components/form">React &lt;form&gt;</a> und <a href="https://react.dev/reference/react/startTransition">startTransition</a>. Diagramm nach dem <a href="https://mermaid.js.org/intro/#mermaid-api">offiziellen Mermaid-CDN-Beispiel</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 23.10.2026 | Optimistischer State ist eine Projektion, keine zweite Wahrheit | React-State-Modellierung | Tief;</p>
+<p>Bereich-Rotation: heute React-State-Modellierung → morgen z. B. Datenzugriff &amp; Caching;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
