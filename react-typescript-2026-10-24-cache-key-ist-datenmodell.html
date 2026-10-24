@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein Cache-Key ist Teil deines Datenmodells</title>
+<meta name="description" content="Warum ein zu kleiner Cache-Key fachlich verschiedene Requests gleichsetzt und wie explizite Identitätstupel falsche Cache-Treffer verhindern.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein Cache-Key ist Teil deines Datenmodells</h1>
+<p class="subtitle">Wer nur die Produkt-ID speichert, erklärt Sprache, Währung und Mandant versehentlich für bedeutungslos.</p>
+<p class="meta">24.10.2026 · Datenzugriff &amp; Caching · TypeScript 6.0 + Fetch API · Tief · ~8 min</p>
+<p>Ein Nutzer öffnet Produkt 42 auf Deutsch und sieht 19,90 Euro. Kurz darauf öffnet ein anderer Mandant dasselbe Produkt auf Englisch und erwartet US-Dollar – bekommt aber exakt die erste Darstellung. Der Request im Network-Tab wäre korrekt gewesen. Er wurde nur nie ausgeführt, weil der Anwendungscache unter <code>42</code> bereits einen vermeintlichen Treffer gefunden hat.</p>
+
+<h2>TL;DR</h2>
+<p>Zwei Requests dürfen denselben Cache-Key teilen, wenn ihre Antworten für alle Consumer austauschbar sind. Nimm deshalb jedes Eingabefeld in die Identität auf, das die Repräsentation beeinflusst: Pfad, Query-Parameter, Mandanten- oder Berechtigungskontext und relevante Header. Baue den Key in genau einer typisierten Fabrik und teste gezielt, dass fachlich verschiedene Requests verschiedene Keys erhalten.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst <code>Map</code>, <code>fetch</code>, Union Types und asynchrone Funktionen. Die Beispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> und die standardisierte <a href="https://developer.mozilla.org/en-US/docs/Web/API/Request">Request-Schnittstelle</a>. Vorausgesetzt sind DOM-Typen, ein Backend-Endpunkt für Produktdarstellungen und ein Runtime-Parser <code>parseProduct</code>, der unbekanntes JSON validiert.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Ein Key ist keine technische Abkürzung, sondern eine Äquivalenzbehauptung: Gleicher Key bedeutet „dieselbe Antwort darf wiederverwendet werden“. Lässt die Key-Funktion <code>locale</code> weg, behauptet sie, deutsche und englische Darstellungen seien gleich. Lässt sie <code>scopeId</code> weg, behauptet sie dasselbe für zwei Sicherheitskontexte.</p>
+<p>Damit wird die Key-Funktion zu einem kleinen, aber zentralen Datenmodell. TypeScript kann sicherstellen, dass nur ein definierter Key-Typ in den Cache gelangt. Es kann jedoch nicht selbst wissen, welche Eingaben die Serverantwort verändern. Diese fachliche Vollständigkeit musst du in der Fabrik ausdrücken und mit Gegenbeispielen prüfen.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die folgende Implementierung verwendet einen leicht verständlichen Key. Genau darin liegt der Fehler: <code>productId</code> identifiziert das Produkt, aber nicht seine konkrete Repräsentation.</p>
+<pre><code>import { parseProduct, type Product } from "./product-schema";
+
+type ProductRequest = {
+  scopeId: string;
+  productId: string;
+  locale: string;
+  currency: "EUR" | "USD";
+  accessToken: string;
+};
+
+const productCache = new Map&lt;string, Product&gt;();
+
+export async function loadProduct(input: ProductRequest) {
+  const cached = productCache.get(input.productId);
+  if (cached) return cached;
+
+  const url = new URL(`/api/products/${input.productId}`, location.origin);
+  url.searchParams.set("locale", input.locale);
+  url.searchParams.set("currency", input.currency);
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${input.accessToken}` }
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  const product = parseProduct(await response.json());
+  productCache.set(input.productId, product);
+  return product;
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Der erste erfolgreiche Aufruf besetzt den Eintrag <code>42</code>. Danach überspringt jeder Aufruf mit dieser Produkt-ID URL-Konstruktion, Authentifizierung und Serverlogik. Weder <code>locale</code> noch <code>currency</code> oder <code>scopeId</code> können den Treffer unterscheiden. Das Symptom ist deshalb nicht bloß „etwas zu alt“, sondern eine Antwortvariante, die nie für diesen Request bestimmt war.</p>
+<p>Bei mandanten- oder berechtigungsspezifischen Antworten kann daraus eine Datenisolation-Schwäche entstehen. Das hängt davon ab, ob der zurückgegebene Inhalt tatsächlich vertrauliche Unterschiede enthält; der gezeigte Cache beseitigt jedenfalls die vorgesehene Trennung. Ein kürzeres Ablaufdatum reduziert nur das Zeitfenster. Es korrigiert nicht die falsche Identität.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Definiere die Identität als explizites Tupel mit fester Reihenfolge. <code>JSON.stringify</code> vermeidet hier Trennzeichen-Kollisionen wie <code>a:b</code> gegen <code>a</code> und <code>b:c</code>. Der rohe Zugriffstoken gehört nicht in den Key: Er ist ein Secret und wechselt unabhängig von der fachlichen Identität. Verwende stattdessen einen stabilen, nicht geheimen Scope oder halte den gesamten Cache innerhalb einer Session.</p>
+<pre><code>import { parseProduct, type Product } from "./product-schema";
+
+type Currency = "EUR" | "USD";
+type ProductRequest = {
+  scopeId: string;
+  productId: string;
+  locale: string;
+  currency: Currency;
+  accessToken: string;
+};
+type ProductKey = `product:${string}`;
+
+const productCache = new Map&lt;ProductKey, Product&gt;();
+
+export function productKey(input: ProductRequest): ProductKey {
+  const identity = [
+    input.scopeId,
+    input.productId,
+    input.locale.toLowerCase(),
+    input.currency
+  ] as const satisfies readonly [string, string, string, Currency];
+
+  return `product:${JSON.stringify(identity)}`;
+}
+
+export async function loadProduct(input: ProductRequest): Promise&lt;Product&gt; {
+  const key = productKey(input);
+  const cached = productCache.get(key);
+  if (cached) return cached;
+
+  const url = new URL(`/api/products/${input.productId}`, location.origin);
+  url.searchParams.set("locale", input.locale.toLowerCase());
+  url.searchParams.set("currency", input.currency);
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${input.accessToken}` }
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  const product = parseProduct(await response.json());
+  productCache.set(key, product);
+  return product;
+}</code></pre>
+<p>Der Trade-off ist eine größere Zahl von Einträgen. Das ist kein Grund, Varianten zusammenzuwerfen: Begrenze Lebenszeit und Größe separat und definiere eine Invalidierungsstrategie. Identität beantwortet „welcher Eintrag?“, Eviction „wie lange bleibt er?“. Beides sind unterschiedliche Entscheidungen.</p>
+<p>Als Alternative kannst du die normalisierte Request-URL plus relevante Request-Metadaten als Key verwenden oder das Caching dem HTTP-Layer überlassen. HTTP-Caches berücksichtigen URL und Methode; mit <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Vary"><code>Vary</code></a> kann der Server zusätzliche Header benennen, welche die Antwort beeinflussen. Ein selbst gebauter <code>Map</code>-Cache übernimmt diese Semantik nicht automatisch.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Request A: Mandant 1, de, EUR] --&gt; C[Key-Fabrik aus allen Identitätsfeldern]
+  B[Request B: Mandant 2, en, USD] --&gt; C
+  C --&gt; D[Zwei verschiedene Cache-Keys]
+  D --&gt; E[Getrennte Antwortvarianten]
+</div>
+<figcaption>Die Key-Fabrik bewahrt genau die Unterschiede, welche die Repräsentation bestimmen. Ein Key nur aus der Produkt-ID würde beide oberen Requests kollidieren lassen. Diese Erklärung ist auch ohne das gerenderte Diagramm vollständig.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Normalisiere äquivalente Eingaben an einer Stelle: etwa Sprachcodes, Default-Werte und die Reihenfolge frei kombinierbarer Filter.</li>
+<li>Schreibe keine Access Tokens oder personenbezogenen Rohdaten in Keys. Keys landen häufig in Logs und Diagnosewerkzeugen.</li>
+<li>Eine vollständige Identität ersetzt keine Invalidierung nach Mutationen. Sie verhindert nur falsche Treffer zwischen Varianten.</li>
+<li>Für andere Methoden als <code>GET</code> gehören Methode und gegebenenfalls Body-Semantik in die Entscheidung; <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/GET">GET sollte keinen Request-Body tragen</a>.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten. Erzeuge vier Eingaben für dasselbe Produkt: zwei Sprachen, zwei Währungen und zwei Scopes. Prüfe zuerst, dass der alte Key viermal <code>42</code> ergibt. Prüfe danach paarweise, dass <code>productKey</code> bei jeder fachlichen Änderung verschieden ist, aber <code>de-DE</code> und <code>DE-de</code> nach deiner Normalisierungsregel denselben Key liefern. Entferne testweise <code>scopeId</code> aus dem Tupel: Mindestens ein Test muss rot werden.</p>
+<p>Prüfstand: Die Key-Eigenschaften und die Trennzeichen-Kollision wurden mit einem ausführbaren Node-Modell geprüft. Der TSX-/TypeScript-Ausschnitt wurde in dieser Umgebung nicht kompiliert; ein bestandener Compile-Test wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>HTTP-<code>Vary</code></strong> überträgt dieselbe Identitätsfrage auf gemeinsam genutzte Caches. <strong>Cache-Invalidierung</strong> regelt, wann ein korrekt identifizierter Eintrag veraltet. <strong>Mandantenisolation</strong> verlangt, dass jeder gemeinsam genutzte Speicher den Sicherheitskontext respektiert. <strong>Property-basierte Tests</strong> können zufällige Eingabepaare auf unerwartete Key-Kollisionen prüfen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 24.10.2026: <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/Request">MDN Request</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching">MDN HTTP Caching</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Vary">MDN Vary</a> und <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/GET">MDN GET</a>. Diagramm nach dem <a href="https://mermaid.js.org/intro/#mermaid-api">offiziellen Mermaid-CDN-Beispiel</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 24.10.2026 | Ein Cache-Key ist Teil deines Datenmodells | Datenzugriff &amp; Caching | Tief;</p>
+<p>Bereich-Rotation: heute Datenzugriff &amp; Caching → morgen z. B. TypeScript-Typsystem;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
