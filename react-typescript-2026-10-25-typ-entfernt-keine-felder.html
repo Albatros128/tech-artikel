@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein TypeScript-Typ entfernt keine Felder</title>
+<meta name="description" content="Warum eine DTO-Typannotation geheime Laufzeitfelder nicht entfernt und weshalb API-Antworten eine explizite Projektion brauchen.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein TypeScript-Typ entfernt keine Felder</h1>
+<p class="subtitle">Eine Variable kann wie ein öffentliches DTO aussehen und beim Serialisieren trotzdem Passwort-Hash und Reset-Token enthalten.</p>
+<p class="meta">25.10.2026 · TypeScript-Typsystem · TypeScript 6.0 + ECMAScript JSON · Tief · ~8 min</p>
+<p>Der Endpunkt ist sauber typisiert: Er verspricht <code>PublicUser</code>, die IDE zeigt nur drei öffentliche Properties, und der Pull Request wirkt harmlos. Im Browser tauchen dennoch <code>passwordHash</code> und <code>resetToken</code> auf. Niemand hat <code>any</code> verwendet. Der Fehler entsteht, weil ein statischer Typ mit einer Laufzeittransformation verwechselt wurde.</p>
+
+<h2>TL;DR</h2>
+<p>Eine Typannotation begrenzt, welche Properties TypeScript an einer Stelle sichtbar macht. Sie verändert das JavaScript-Objekt nicht. Übergib deshalb interne Entitäten nie allein durch Umtypisieren an einen Serializer. Erzeuge an der API-Grenze ein neues Objekt über eine explizite Allowlist. Das ist ausführlicher, macht aber die veröffentlichte Datenform überprüfbar.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Objekt-Typen, <code>async</code>/<code>await</code> und JSON. Die Beispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>. Entscheidend sind TypeScripts <a href="https://www.typescriptlang.org/docs/handbook/type-compatibility.html">strukturelle Typkompatibilität</a>, die <a href="https://www.typescriptlang.org/docs/handbook/2/objects.html#excess-property-checks">Excess-Property-Prüfung</a> für frische Objektliterale und das dokumentierte Verhalten von <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify"><code>JSON.stringify</code></a>.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>TypeScript fragt bei einer Zuweisung im Wesentlichen: Besitzt die Quelle mindestens die benötigten kompatiblen Member? Ein <code>DbUser</code> mit fünf zusätzlichen Feldern kann deshalb als <code>PublicUser</code> verwendet werden. Die zusätzlichen Felder verschwinden nicht; nur die statische Sicht wird schmaler.</p>
+<p>Frische Objektliterale wirken strenger, weil TypeScript dort Excess Properties gesondert prüft. Diese Prüfung führt leicht zur falschen Intuition, Objekttypen seien grundsätzlich „geschlossen“. Sobald das Objekt bereits in einer Variablen steckt, greift die normale strukturelle Kompatibilität. Der Serializer erhält anschließend den echten Laufzeitwert, nicht die eingeschränkte Editor-Sicht.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die folgende Funktion ist ohne Type Assertion und ohne <code>any</code> typkompatibel. Trotzdem gibt sie alle aufzählbaren eigenen Felder des Repository-Objekts als JSON aus.</p>
+<pre><code>import { findUserById, type DbUser } from "./user-repository";
+
+type PublicUser = {
+  id: string;
+  displayName: string;
+  avatarUrl: string | null;
+};
+
+function asPublicUser(user: DbUser): PublicUser {
+  return user; // strukturell kompatibel, aber unverändert
+}
+
+export async function serializeUser(id: string): Promise&lt;string&gt; {
+  const entity = await findUserById(id);
+  const dto: PublicUser = asPublicUser(entity);
+  return JSON.stringify(dto);
+}</code></pre>
+<p>Angenommen, <code>DbUser</code> enthält zusätzlich <code>email</code>, <code>passwordHash</code> und <code>resetToken</code>. Die Variable <code>dto</code> erlaubt im TypeScript-Code zwar keinen Zugriff auf diese Member. Das zugrunde liegende Objekt besitzt sie aber weiterhin.</p>
+
+<h2>Warum ist das falsch?</h2>
+<p>Typen werden beim Übersetzen entfernt. Es gibt zur Laufzeit keinen <code>PublicUser</code>-Filter. <code>JSON.stringify</code> besucht laut MDN die aufzählbaren eigenen Properties des übergebenen Objekts. Sind Repository-Felder normale Objekt-Properties, werden sie deshalb serialisiert – unabhängig vom annotierten Variablentyp.</p>
+<p>Beobachtbar ist eine API-Antwort mit mehr Feldern als im OpenAPI-Schema, im Frontend-Typ oder in der IDE. Das ist zunächst ein Vertragsbruch und kann bei sensitiven Feldern ein Sicherheitsvorfall sein. <code>Omit&lt;DbUser, "passwordHash"&gt;</code> löst ihn nicht: Auch ein Utility Type beschreibt nur eine Compile-Time-Sicht und löscht zur Laufzeit nichts.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Erzeuge ein neues Objekt und kopiere ausschließlich die Felder, die den Prozess verlassen dürfen. Das Objektliteral ist gleichzeitig Dokumentation, Transformation und Review-Punkt.</p>
+<pre><code>import { findUserById, type DbUser } from "./user-repository";
+
+type PublicUser = {
+  id: string;
+  displayName: string;
+  avatarUrl: string | null;
+};
+
+export function toPublicUser(user: DbUser): PublicUser {
+  const dto = {
+    id: user.id,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl
+  } satisfies PublicUser;
+
+  return dto;
+}
+
+export async function serializeUser(id: string): Promise&lt;string&gt; {
+  const entity = await findUserById(id);
+  return JSON.stringify(toPublicUser(entity));
+}</code></pre>
+<p><code>satisfies</code> prüft hier nur, dass das neu erzeugte Objekt zum Vertrag passt; die Entfernung geschieht durch die explizite Projektion. Der Trade-off ist Wiederholung. Dafür führt ein neues internes Feld nicht automatisch zu einer neuen öffentlichen Property. Ergänzt du dagegen ein Pflichtfeld im DTO, meldet der Compiler die unvollständige Projektion.</p>
+<p>Eine Rest-Destrukturierung wie <code>const { passwordHash, ...rest } = user</code> ist kürzer, arbeitet aber als Blocklist: Ein später ergänztes Geheimnis landet automatisch in <code>rest</code>. Eine Schema-Bibliothek, die unbekannte Felder nachweislich entfernt, ist eine sinnvolle Alternative für viele Grenzen. Sie bringt Laufzeitkosten und Konfiguration mit; ihr Strip- oder Strict-Verhalten muss getestet werden. Der <code>replacer</code>-Parameter von <code>JSON.stringify</code> kann für eine kleine, zentrale Grenze ebenfalls als Allowlist dienen, erzeugt jedoch kein wiederverwendbares DTO-Objekt.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[DB-Objekt mit internen Feldern] --&gt; B[Typannotation PublicUser]
+  B -- Objekt bleibt gleich --&gt; C[JSON-Serializer]
+  A -- explizite Allowlist --&gt; D[Neues DTO-Objekt]
+  D --&gt; C
+  C --&gt; E[HTTP-Antwort]
+</div>
+<figcaption>Der obere Pfad ändert nur die statische Sicht; der Serializer sieht weiterhin das ursprüngliche Objekt. Erst der untere Pfad erzeugt eine neue Laufzeitform mit den freigegebenen Feldern. Diese Erklärung bleibt ohne Diagramm vollständig.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Getter und eigene <code>toJSON</code>-Methoden können die Serialisierung zusätzlich beeinflussen. Teste die tatsächliche Ausgabe, nicht nur <code>Object.keys</code>.</li>
+<li>Verschachtelte Objekte brauchen eigene Projektionen. Eine sichere äußere Allowlist macht ein eingebettetes internes Profil nicht automatisch öffentlich.</li>
+<li>Verwechsle Response-Projektion nicht mit Eingabevalidierung: Eingehendes <code>unknown</code> muss weiterhin zur Laufzeit geprüft werden.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir fünf Minuten. Lege ein Objekt mit <code>id</code>, <code>displayName</code> und <code>passwordHash</code> an. Weise es einer Variable vom Typ <code>PublicUser</code> zu und serialisiere diese. Erwartung: Der Hash bleibt im JSON. Ersetze die Zuweisung anschließend durch <code>toPublicUser</code>; jetzt darf die Ausgabe nur die explizit kopierten Felder enthalten. Füge dem Ursprungsobjekt danach <code>mfaSecret</code> hinzu und prüfe, dass die Allowlist unverändert sicher bleibt.</p>
+<p>Prüfstand: Die Laufzeitformen, die Blocklist-Gegenprobe und die JSON-Ausgabe wurden mit einem Node-Test geprüft. Ein TypeScript-Compile-Test war in dieser Umgebung nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Runtime-Validierung</strong> schützt die entgegengesetzte Richtung an Eingabegrenzen. <strong>OpenAPI-Vertragstests</strong> entdecken zusätzliche Response-Felder. <strong>Data Minimization</strong> fragt, welche Daten ein Consumer überhaupt benötigt. <strong>Mapper-Tests</strong> sichern explizite Projektionen gegen unbeabsichtigte Erweiterungen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 25.10.2026: <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a>, <a href="https://www.typescriptlang.org/docs/handbook/type-compatibility.html">Type Compatibility</a>, <a href="https://www.typescriptlang.org/docs/handbook/2/objects.html#excess-property-checks">Excess Property Checks</a> und <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify">MDN JSON.stringify</a>. Diagramm nach dem <a href="https://mermaid.js.org/intro/#mermaid-api">offiziellen Mermaid-CDN-Beispiel</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 25.10.2026 | Ein TypeScript-Typ entfernt keine Felder | TypeScript-Typsystem | Tief;</p>
+<p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. React-Render-Verhalten;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
