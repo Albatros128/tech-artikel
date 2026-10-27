@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memoisierung ist eine Hypothese, kein Refactoring-Ziel</title>
+<meta name="description" content="Wie React Profiler, memo und stabile Props zu einer überprüfbaren Performance-Entscheidung werden statt zu vorsorglicher Komplexität.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Memoisierung ist eine Hypothese, kein Refactoring-Ziel</h1>
+<p class="subtitle">Erst ein reproduzierbarer Profiler-Vergleich zeigt, ob <code>memo</code> eine teure Wiederholung verhindert oder nur neue Komplexität einführt.</p>
+<p class="meta">27.10.2026 · Performance-Messung · React 19.3 + TypeScript · Tief · ~8 min</p>
+<p>Eine Suchseite fühlt sich beim Öffnen des Hilfetexts träge an. Im Review erhält die Ergebnisliste vorsorglich <code>memo</code>, jede Berechnung wandert in <code>useMemo</code>. Der Code wird länger, doch niemand kann sagen, ob die relevante Interaktion schneller wurde. Schlimmer: Das Array-Prop wird bei jedem Render neu erzeugt, sodass die vermeintliche Optimierung gar keinen Render überspringen kann.</p>
+
+<h2>TL;DR</h2>
+<p>Formuliere Memoisierung als überprüfbare Hypothese: „Bei Interaktion X rendert Teilbaum Y teuer, obwohl seine fachlichen Eingaben gleich bleiben.“ Messe denselben Ablauf vor und nach der Änderung mit Reacts <a href="https://react.dev/reference/react/Profiler"><code>&lt;Profiler&gt;</code></a> oder den React Developer Tools. Stabilisiere Props nur dann, wenn die Messung genau diese Ursache zeigt. Entferne die Änderung, wenn der Effekt nicht reproduzierbar ist.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Renderzyklen, referenzielle Gleichheit und Hooks. Die <a href="https://react.dev/versions">Versionsseite</a> führt React 19.3. Relevant sind <a href="https://react.dev/reference/react/Profiler"><code>Profiler</code></a>, <a href="https://react.dev/reference/react/memo"><code>memo</code></a> und <a href="https://react.dev/reference/react/useMemo"><code>useMemo</code></a>. Das Beispiel setzt ein React-TypeScript-Projekt mit <code>strict</code> voraus. Es enthält bewusst keine erfundenen Zeitwerte: Die Resultate hängen von Daten, Gerät, Build und Interaktion ab.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p><code>memo</code> beantwortet keine Performancefrage. Es stellt eine Bedingung auf: Wenn ein Elternteil rendert und alle Props nach <code>Object.is</code> gleich geblieben sind, darf React den Kindrender normalerweise überspringen. Schon ein neues Array, Objekt oder eine neue Funktion macht diese Bedingung falsch.</p>
+<p>Der Profiler trennt dabei zwei Größen. <code>actualDuration</code> beschreibt die Renderzeit des profilierten Teilbaums für den aktuellen Commit. <code>baseDuration</code> schätzt die Kosten eines vollständigen Renders ohne Optimierungen aus den jüngsten Komponentenzeiten. Der Vergleich zeigt, ob Memoisierung in diesem Teilbaum greift; er misst nicht automatisch Netzwerk, Effects oder den vollständigen Zeitraum bis zum nächsten Paint.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die Ergebnisliste ist memoisiert. Trotzdem erhält sie bei jedem Render ein neues Array. Auch das Öffnen der Hilfe erzeugt deshalb ein anderes <code>items</code>-Prop.</p>
+<pre><code>import { memo, useState } from "react";
+
+type Product = { id: string; name: string };
+type Props = { products: readonly Product[] };
+
+const Results = memo(function Results(
+  { items }: { items: readonly Product[] }
+) {
+  return (
+    &lt;ul&gt;
+      {items.map(item =&gt; &lt;li key={item.id}&gt;{item.name}&lt;/li&gt;)}
+    &lt;/ul&gt;
+  );
+});
+
+export function SearchPage({ products }: Props) {
+  const [query, setQuery] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
+  const visible = products.filter(product =&gt;
+    product.name.toLowerCase().includes(query.toLowerCase())
+  );
+
+  return (
+    &lt;&gt;
+      &lt;input value={query} onChange={e =&gt; setQuery(e.target.value)} /&gt;
+      &lt;button onClick={() =&gt; setShowHelp(value =&gt; !value)}&gt;Hilfe&lt;/button&gt;
+      {showHelp &amp;&amp; &lt;p&gt;Tippe einen Produktnamen.&lt;/p&gt;}
+      &lt;Results items={visible} /&gt;
+    &lt;/&gt;
+  );
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p><code>Array.prototype.filter</code> liefert bei jedem Aufruf ein neues Array. Inhaltlich identische Ergebnisse sind daher nicht referenziell identisch. Die Standardprüfung von <code>memo</code> sieht ein verändertes Prop und rendert <code>Results</code> erneut. Der Wrapper ist nicht kaputt; seine Voraussetzung wurde nie erfüllt.</p>
+<p>Ohne Baseline bleibt außerdem unklar, ob dieser Render überhaupt das wahrgenommene Problem verursacht. Vielleicht ist die Liste klein, während ein Layout-Schritt, ein Effect oder eine Browser-Erweiterung dominiert. Mehr Memoisierung kann Lesbarkeit verschlechtern und Dependency-Fehler begünstigen, ohne die relevante Interaktion messbar zu verändern.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Instrumentiere zunächst den verdächtigen Teilbaum. Wiederhole eine klar benannte Interaktion – hier zehnmal „Hilfe öffnen/schließen“ bei unveränderter Suche – mit denselben Daten und demselben Build. Sammle nicht nur einen Ausreißer, sondern mehrere Commits.</p>
+<pre><code>import {
+  memo, Profiler, useMemo, useState,
+  type ProfilerOnRenderCallback
+} from "react";
+
+type Product = { id: string; name: string };
+type Props = { products: readonly Product[] };
+
+const reportRender: ProfilerOnRenderCallback = (
+  id, phase, actualDuration, baseDuration
+) =&gt; {
+  console.table({ id, phase, actualDuration, baseDuration });
+};
+
+const Results = memo(function Results(
+  { items }: { items: readonly Product[] }
+) {
+  return &lt;ul&gt;{items.map(item =&gt;
+    &lt;li key={item.id}&gt;{item.name}&lt;/li&gt;
+  )}&lt;/ul&gt;;
+});
+
+export function SearchPage({ products }: Props) {
+  const [query, setQuery] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
+  const normalizedQuery = query.toLowerCase();
+  const visible = useMemo(
+    () =&gt; products.filter(product =&gt;
+      product.name.toLowerCase().includes(normalizedQuery)
+    ),
+    [products, normalizedQuery]
+  );
+
+  return (
+    &lt;&gt;
+      &lt;input value={query} onChange={e =&gt; setQuery(e.target.value)} /&gt;
+      &lt;button onClick={() =&gt; setShowHelp(value =&gt; !value)}&gt;Hilfe&lt;/button&gt;
+      {showHelp &amp;&amp; &lt;p&gt;Tippe einen Produktnamen.&lt;/p&gt;}
+      &lt;Profiler id="results" onRender={reportRender}&gt;
+        &lt;Results items={visible} /&gt;
+      &lt;/Profiler&gt;
+    &lt;/&gt;
+  );
+}</code></pre>
+<p>Diese Änderung stabilisiert <code>visible</code>, solange <code>products</code> und Suchtext gleich bleiben. Ob sie sich lohnt, entscheidet der Vorher-nachher-Vergleich. Profiling selbst verursacht Overhead und ist im normalen Production-Build standardmäßig deaktiviert; für Produktionsmessungen brauchst du einen dafür vorgesehenen Profiling-Build.</p>
+<p>Eine oft einfachere Alternative ist strukturell: Verschiebe den Hilfe-State in eine kleine Geschwisterkomponente. Dann rendert der Suchseiten-Elternteil beim Umschalten nicht erneut, und die Ergebnisliste benötigt möglicherweise weder <code>memo</code> noch stabile Array-Props. Der Trade-off ist eine zusätzliche Komponentengrenze; dafür verschwinden Memo-Abhängigkeiten.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Definierte Interaktion] --&gt; B[Profiler-Baseline]
+  B -- Engpass bestätigt --&gt; C[Gezielte Änderung]
+  C --&gt; D[Gleiche Interaktion erneut]
+  D -- reproduzierbarer Effekt --&gt; E[Änderung behalten]
+  D -- kein Effekt --&gt; B
+</div>
+<figcaption>Die Schleife macht aus einer Vermutung eine überprüfbare Entscheidung. Szenario, Daten und Build bleiben vergleichbar; nur die gezielte Änderung variiert. Diese Erklärung funktioniert auch ohne Diagramm.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Entwicklungsmodus und Strict Mode können zusätzliche Arbeit sichtbar machen. Vergleiche immer unter denselben Bedingungen.</li>
+<li>Ein eigener <code>arePropsEqual</code>-Vergleich kann teurer oder fehleranfälliger sein als der Render. Messe auch ihn und vergleiche jede funktionale Prop.</li>
+<li><code>useMemo</code> ist keine semantische Garantie. Wenn der Code ohne Cache falsch wäre, brauchst du State, Ref oder eine andere Ownership-Grenze.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir fünfzehn Minuten. Profiliere zehn Hilfe-Umschaltungen mit der Fehlervariante und notiere die <code>actualDuration</code>-Werte des Ergebnis-Teilbaums. Führe danach exakt denselben Ablauf mit stabilisiertem Array durch. Erwartung: Prüfe zuerst, ob die Ergebnisliste beim unveränderten Suchtext überhaupt noch committed wird; bewerte erst dann die Zeitverteilung. Ändere anschließend den Suchtext: Jetzt muss die Liste wieder rendern.</p>
+<p>Prüfstand: Die referenzielle Ursache wurde mit einem Node-Modell geprüft: wiederholtes <code>filter</code> erzeugt neue Referenzen, eine abhängigkeitsbasierte Memo-Funktion hält sie bei unveränderten Eingaben stabil. Mangels React-Paketen wurde kein Profiler-Benchmark ausgeführt; es werden keine Zeitgewinne behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>React Developer Tools Profiler</strong> liefert eine interaktive Commit-Ansicht. <strong>User Timing</strong> misst anwendungsdefinierte Zeiträume jenseits reiner Renderarbeit. <strong>State-Colocation</strong> vermeidet unnötige Elternrenders strukturell. <strong>Virtualisierung</strong> begrenzt die tatsächlich gerenderte Listenmenge, wenn Messungen die Listengröße als Ursache bestätigen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 27.10.2026: <a href="https://react.dev/versions">React-Versionen</a>, <a href="https://react.dev/reference/react/Profiler">Profiler</a>, <a href="https://react.dev/reference/react/memo">memo</a>, <a href="https://react.dev/reference/react/useMemo">useMemo</a> und <a href="https://developer.mozilla.org/en-US/docs/Web/API/Performance_API/User_timing">MDN User Timing</a>. Diagramm nach dem <a href="https://mermaid.js.org/intro/#mermaid-api">offiziellen Mermaid-CDN-Beispiel</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 27.10.2026 | Memoisierung ist eine Hypothese, kein Refactoring-Ziel | Performance-Messung | Tief;</p>
+<p>Bereich-Rotation: heute Performance-Messung → morgen z. B. TypeScript-Generics;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
