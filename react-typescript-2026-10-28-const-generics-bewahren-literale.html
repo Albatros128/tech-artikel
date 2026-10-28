@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Literalgenauigkeit gehört an die Generic-API-Grenze</title>
+<meta name="description" content="Warum const-Typparameter deklarative TypeScript-APIs präziser machen, ohne Laufzeitwerte einzufrieren.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Literalgenauigkeit gehört an die Generic-API-Grenze</h1>
+<p class="subtitle"><code>as const</code> an jedem Aufruf ist oft kein Datenproblem, sondern ein Hinweis auf eine zu breit inferierende Bibliotheks-API.</p>
+<p class="meta">28.10.2026 · TypeScript-Generics · TypeScript 6.0, <code>const</code>-Typparameter seit 5.0 · Tief · ~8 min</p>
+<p>Du baust einen typisierten Router. Aus seiner Konfiguration soll automatisch die Union <code>"dashboard" | "profile"</code> entstehen. Trotzdem akzeptiert <code>navigate("dashbaord")</code> den Tippfehler. Die Route steht als Literal im Quelltext, doch am Ende bleibt nur <code>string</code>. Der übliche Patch lautet <code>as const</code> – und wandert bald in jeden Aufruf deiner API.</p>
+
+<h2>TL;DR</h2>
+<p>Wenn eine Generic-API inline geschriebene Konfiguration als präzise Datenbeschreibung behandeln soll, setze den <code>const</code>-Modifikator am Typparameter und verwende readonly-kompatible Constraints. Damit wird const-ähnliche Inferenz zum Standard der API. Das friert keine Werte zur Laufzeit ein, verengt keine bereits verbreiterte Variable und ist ungeeignet, wenn Aufrufer die Daten bewusst verändern sollen.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Generics, Constraints, <code>typeof</code> und Indexed Access Types. Die Beispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>. <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html#const-type-parameters"><code>const</code>-Typparameter</a> kamen mit TypeScript 5.0. Für die Laufzeitgrenze ist außerdem das Verhalten von <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze"><code>Object.freeze</code></a> relevant.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Die Frage ist nicht nur, <em>welcher</em> Typ einen Parameter begrenzt, sondern auch, <em>wie genau</em> TypeScript den Typ am Aufruf inferieren soll. Gewöhnliche Inferenz wählt bei veränderbaren Objekt- und Array-Ausdrücken oft allgemeinere Typen. Das ist sinnvoll, wenn der Wert später mutiert wird. Für deklarative Konfiguration vernichtet es jedoch genau die Information, aus der deine API sichere Schlüssel oder Kommandos ableiten soll.</p>
+<p>Ein <code>const</code>-Typparameter verschiebt diese Entscheidung zum API-Autor. Inline-Literale werden standardmäßig so präzise inferiert, als hätte der Aufrufer const-ähnliche Typen angefordert. Der Modifikator ist damit eine Inferenzrichtlinie – keine Validierung und kein Mechanismus für Laufzeit-Unveränderlichkeit.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Diese selbständige TypeScript-Moduldatei braucht keine Imports. Der Constraint prüft zwar die Form jeder Route, die gewöhnliche Inferenz verbreitert aber die Namen:</p>
+<pre><code>export type RouteSpec = {
+  name: string;
+  path: `/${string}`;
+  roles: readonly string[];
+};
+
+export function defineRoutes&lt;T extends readonly RouteSpec[]&gt;(
+  routes: T
+): T {
+  return routes;
+}
+
+export const routes = defineRoutes([
+  { name: "dashboard", path: "/dashboard", roles: ["admin"] },
+  { name: "profile", path: "/profile", roles: ["user", "admin"] }
+]);
+
+export type RouteName = (typeof routes)[number]["name"];
+// RouteName ist string – der Tippfehler bleibt typgültig.
+export const navigate = (name: RouteName) =&gt; name;
+navigate("dashbaord");</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Die API verspricht eine Beziehung zwischen Eingabe und Rückgabetyp, verliert aber beim Inferieren die Literale, auf denen diese Beziehung beruht. Das beobachtbare Symptom ist eine nutzlose <code>string</code>-Union: Autocomplete kann keine endliche Menge anbieten und ungültige Namen erreichen nachgelagerten Code.</p>
+<p><code>as const</code> am Aufruf repariert das Beispiel, verteilt die Verantwortung aber an jeden Consumer. Noch wichtiger: Eine vorher deklarierte Variable ist bereits verbreitert. Laut TypeScript-Dokumentation wirkt der Modifikator nur auf Objekt-, Array- und primitive Ausdrücke, die direkt im Aufruf stehen. Er kann verlorene Information nicht rückwirkend rekonstruieren.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Die korrigierte API ändert genau ein Wort. Ihr Constraint bleibt readonly-kompatibel, damit die präzise readonly-Kandidatin nicht an einem mutablen Constraint scheitert:</p>
+<pre><code>export type RouteSpec = {
+  name: string;
+  path: `/${string}`;
+  roles: readonly string[];
+};
+
+export function defineRoutes&lt;
+  const T extends readonly RouteSpec[]
+&gt;(routes: T): T {
+  return routes;
+}
+
+export const routes = defineRoutes([
+  { name: "dashboard", path: "/dashboard", roles: ["admin"] },
+  { name: "profile", path: "/profile", roles: ["user", "admin"] }
+]);
+
+export type RouteName = (typeof routes)[number]["name"];
+// "dashboard" | "profile"
+export const navigate = (name: RouteName) =&gt; name;
+
+navigate("dashboard");
+// navigate("dashbaord"); // Compilerfehler</code></pre>
+<p>Das Muster passt zu Routern, Event-Katalogen, Query Keys und Schema-Buildern: Der konkrete Literalwert ist Teil des Vertrags. Der Preis sind tiefere readonly- und Literaltypen, die bei absichtlicher Mutation stören können. Für veränderbare Arbeitsdaten ist ein normaler Generic oft ehrlicher. Eine Alternative bleibt <code>as const</code> am einzelnen Literal; sie ist sinnvoll, wenn nur ein Aufruf Präzision braucht oder du die Bibliotheks-API nicht kontrollierst. Explizite Generic-Argumente funktionieren ebenfalls, sind aber ausführlich und können vom Laufzeitwert wegdriften.</p>
+<p>Wichtig: Die Funktion gibt zur Laufzeit dieselbe Referenz zurück. Wer echte Unveränderlichkeit braucht, muss sie separat implementieren, etwa mit defensiven Kopien oder <code>Object.freeze</code>; letzteres ist laut MDN zudem nur flach.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Inline-Routenkonfiguration] -- normale Inferenz --&gt; B[Gewöhnlicher Generic]
+  B --&gt; C[name ist string]
+  A -- const-Inferenz --&gt; D[const Generic]
+  D --&gt; E[name ist endliche Union]
+</div>
+<figcaption>Beide Pfade prüfen dieselbe strukturelle Route. Der Unterschied ist die Inferenzstrategie: Nur der untere Pfad bewahrt die Literalnamen, aus denen die öffentliche API ihre erlaubten Werte ableitet. Diese Erklärung bleibt ohne gerendertes Diagramm vollständig.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Ein Constraint wie <code>const T extends string[]</code> kann auf <code>string[]</code> zurückfallen, weil die readonly-Tupel-Kandidatin nicht zu einem mutablen Array passt.</li>
+<li>Eine Variable wie <code>const config = [...]</code> ist ohne <code>as const</code> nicht automatisch ein Literal-Tupel. <code>const</code> verhindert nur die Neuzuweisung der Variablen.</li>
+<li>Daten aus JSON bleiben Laufzeitdaten. Präzise Generics ersetzen dort weder Parsing noch Validierung.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten und kopiere beide Varianten in den TypeScript Playground mit Version 6.0. Fahre über <code>RouteName</code>: Oben erwartest du <code>string</code>, unten die Union aus zwei Namen. Entferne danach <code>readonly</code> aus dem Array-Constraint und beobachte den Rückfall. Speichere die Routen zuletzt erst in einer normalen Variablen und übergib diese; auch der <code>const</code>-Generic kann die bereits verlorenen Literale nicht wiederherstellen.</p>
+<p>Prüfstand: Dokumentstruktur, Diagrammanzahl und das Laufzeitverhalten „gleiche Referenz, nicht eingefroren“ wurden lokal geprüft. Ein TypeScript-Compile-Test war in dieser Umgebung nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong><code>satisfies</code></strong> prüft eine Konfiguration, ohne ihren Ausdruck auf den Zieltyp zu annotieren. <strong><code>NoInfer</code></strong> steuert, welches Argument einen Generic mitbestimmen darf. <strong>Template Literal Types</strong> leiten aus erhaltenen Literalen neue Namensräume ab. <strong>Runtime-Validierung</strong> übernimmt dort, wo Werte nicht aus vertrauenswürdigem TypeScript-Quelltext stammen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 28.10.2026: <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html#const-type-parameters">TypeScript 5.0: <code>const</code> Type Parameters</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze">MDN: <code>Object.freeze</code></a> und die <a href="https://mermaid.js.org/config/usage">offizielle Mermaid-CDN-Anleitung für Version 12</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 28.10.2026 | Literalgenauigkeit gehört an die Generic-API-Grenze | TypeScript-Generics | Tief;</p>
+<p>Bereich-Rotation: heute TypeScript-Generics → morgen z. B. React-Komponenten-APIs;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
