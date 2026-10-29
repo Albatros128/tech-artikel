@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compound Components brauchen einen Datenkanal, keine Kind-Manipulation</title>
+<meta name="description" content="Warum React-Tabs mit Context stabiler komponierbar sind als mit Children.map und cloneElement.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Compound Components brauchen einen Datenkanal, keine Kind-Manipulation</h1>
+<p class="subtitle">Tabs wirken flexibel, bis ein harmloser Layout-Wrapper verhindert, dass der aktive Zustand seine eigentlichen Empfänger erreicht.</p>
+<p class="meta">29.10.2026 · React-Komponenten-APIs · React 19.3 + TypeScript 6.0 · Tief · ~9 min</p>
+<p>Deine Tabs funktionieren im Storybook. Dann verschiebt ein Consumer die Schaltflächen in eine Toolbar und die Panels in einen responsiven Container. Das Markup ist gültig, doch kein Tab wird mehr aktiv. Die Komponente hatte ihre Daten nicht an semantische Teilnehmer verteilt, sondern an eine bestimmte Form des JSX-Baums.</p>
+
+<h2>TL;DR</h2>
+<p>Nutze <code>Children.map</code> und <code>cloneElement</code> nicht als verborgenes Prop-Routing für Compound Components. React traversiert dabei empfangene JSX-Knoten, nicht das später gerenderte Ergebnis innerer Komponenten. Stelle gemeinsamen Zustand und Aktionen über einen privaten Context bereit. So hängt die API an der Provider-Grenze statt an direkter Kindposition. Der Trade-off sind eine implizite Abhängigkeit und Context-bedingte Re-Renders.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst <code>children</code>, Hooks und kontrollierten Zustand. Die Beispiele beziehen sich auf <a href="https://react.dev/blog/2026/09/09/react-19-3">React 19.3</a> und TypeScript 6.0. Relevant sind die offiziellen Hinweise zu <a href="https://react.dev/reference/react/Children"><code>Children</code></a>, <a href="https://react.dev/reference/react/cloneElement"><code>cloneElement</code></a>, <a href="https://react.dev/reference/react/createContext"><code>createContext</code></a> und <a href="https://react.dev/reference/react/useContext"><code>useContext</code></a>.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>JSX ist keine bereits gerenderte Komponentenstruktur. Ein Element wie <code>&lt;TabList /&gt;</code> ist für seinen Parent zunächst ein einzelner, opaker Knoten. Laut React-Dokumentation geht die <code>Children</code>-Traversal nicht tiefer als React-Elemente; deren spätere Ausgabe ist nicht enthalten. Auch Fragmente werden dabei nicht traversiert.</p>
+<p>Eine Compound-Component-API verspricht dagegen semantische Zugehörigkeit: Jeder <code>Tab</code> unter demselben <code>Tabs</code>-Owner soll denselben aktiven Wert lesen können. Context modelliert genau diese Beziehung. Er sucht den nächstgelegenen Provider oberhalb eines Consumers, unabhängig davon, wie viele Layout-Komponenten dazwischenliegen.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Diese Variante injiziert interne Props nur in direkte <code>Tab</code>-Kinder. Sie sieht kompakt aus, koppelt aber Verhalten und Layout:</p>
+<pre><code>import {
+  Children, cloneElement, isValidElement, useState,
+  type ReactElement, type ReactNode
+} from "react";
+
+type InjectedTabProps = {
+  value: string;
+  active?: boolean;
+  onSelect?: (value: string) =&gt; void;
+};
+
+export function Tabs({ children }: { children: ReactNode }) {
+  const [active, setActive] = useState("overview");
+
+  return Children.map(children, child =&gt; {
+    if (!isValidElement&lt;InjectedTabProps&gt;(child) || child.type !== Tab) {
+      return child;
+    }
+    return cloneElement(child as ReactElement&lt;InjectedTabProps&gt;, {
+      active: child.props.value === active,
+      onSelect: setActive
+    });
+  });
+}
+
+function Tab(props: InjectedTabProps) {
+  return &lt;button onClick={() =&gt; props.onSelect?.(props.value)}&gt;
+    {props.value}
+  &lt;/button&gt;;
+}</code></pre>
+<p>Schon <code>&lt;Tabs&gt;&lt;TabList&gt;&lt;Tab value="overview" /&gt;&lt;/TabList&gt;&lt;/Tabs&gt;</code> bricht den Vertrag: <code>Tabs</code> sieht <code>TabList</code>, nicht dessen Renderausgabe. Rekursive Elementinspektion löst das nicht zuverlässig, weil sie weiterhin keine Funktionskomponenten ausführt.</p>
+
+<h2>Warum ist das falsch?</h2>
+<p>Der Parent errät anhand von <code>child.type</code>, welche Elemente am Protokoll teilnehmen, und überschreibt deren Props. Dadurch wird der Datenfluss schwerer nachzuverfolgen; React bezeichnet <code>cloneElement</code> selbst als selten und potenziell fragil. Wrapper, Fragmente, Lazy Components oder Design-System-Abstraktionen werden zu unerwarteten API-Grenzen.</p>
+<p>Beobachtbar sind Tabs ohne <code>active</code> oder Handler, obwohl sie visuell innerhalb von <code>Tabs</code> stehen. TypeScript kann das nicht verhindern: Der eigentliche Fehler ist eine Laufzeitannahme über Baumform, keine fehlende Property im öffentlichen Typ.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Ein privater Context transportiert nur das gemeinsame Protokoll. Öffentliche Komponenten behalten verständliche Fach-Props; injizierte Props verschwinden aus ihrer API:</p>
+<pre><code>import {
+  createContext, useContext, useId, useMemo, useState,
+  type ReactNode
+} from "react";
+
+type TabsValue = {
+  active: string;
+  select: (value: string) =&gt; void;
+  idBase: string;
+};
+
+const TabsContext = createContext&lt;TabsValue | null&gt;(null);
+
+function useTabs(): TabsValue {
+  const value = useContext(TabsContext);
+  if (!value) throw new Error("Tab muss innerhalb von Tabs stehen");
+  return value;
+}
+
+export function Tabs(props: { defaultValue: string; children: ReactNode }) {
+  const [active, select] = useState(props.defaultValue);
+  const idBase = useId();
+  const value = useMemo(() =&gt; ({ active, select, idBase }), [active, idBase]);
+  return &lt;TabsContext value={value}&gt;{props.children}&lt;/TabsContext&gt;;
+}
+
+export function TabList({ children }: { children: ReactNode }) {
+  return &lt;div role="tablist"&gt;{children}&lt;/div&gt;;
+}
+
+export function Tab({ value, children }: { value: string; children: ReactNode }) {
+  const tabs = useTabs();
+  const selected = tabs.active === value;
+  return &lt;button role="tab" aria-selected={selected}
+    id={`${tabs.idBase}-tab-${value}`}
+    aria-controls={`${tabs.idBase}-panel-${value}`}
+    tabIndex={selected ? 0 : -1}
+    onClick={() =&gt; tabs.select(value)}&gt;{children}&lt;/button&gt;;
+}
+
+export function TabPanel({ value, children }: { value: string; children: ReactNode }) {
+  const tabs = useTabs();
+  return &lt;div role="tabpanel" hidden={tabs.active !== value}
+    id={`${tabs.idBase}-panel-${value}`}
+    aria-labelledby={`${tabs.idBase}-tab-${value}`}&gt;{children}&lt;/div&gt;;
+}</code></pre>
+<p>In React 19 darf der Context direkt als Provider gerendert werden; ältere React-Versionen verwenden <code>&lt;TabsContext.Provider&gt;</code>. Die API bleibt nun durch Wrapper hindurch funktionsfähig. Sie hat aber eine implizite Voraussetzung: <code>Tab</code> muss unter <code>Tabs</code> stehen. Der absichtliche Fehler im Custom Hook macht diese Verletzung früh sichtbar.</p>
+<p>Wenn Consumers den Zustand kontrollieren müssen, ergänze <code>value</code> und <code>onValueChange</code> statt eine zweite State-Quelle einzubauen. Für kleine, starre Komponenten kann explizites Prop-Passing einfacher sein. Eine Daten-Prop wie <code>items</code> ist die bessere Alternative, wenn die Bibliothek Reihenfolge und Rendering vollständig besitzen soll. Context aktualisiert alle lesenden Consumer bei geändertem Wert; eine Optimierung solltest du erst nach einer Messung begründen.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Tabs besitzt aktiven Wert] -- direkter JSX-Knoten --&gt; B[Children plus cloneElement]
+  B -- Wrapper verdeckt Tab --&gt; C[keine injizierten Props]
+  A -- Provider-Grenze --&gt; D[Tabs Context]
+  D -- beliebige Zwischenschichten --&gt; E[Tab und TabPanel]
+</div>
+<figcaption>Der obere Pfad koppelt die Datenübergabe an direkte Kindpositionen. Im unteren Pfad ist nur entscheidend, dass Consumer unter demselben Provider liegen. Die Erklärung bleibt auch ohne gerendertes Diagramm vollständig.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Der gezeigte Ausschnitt implementiert keine Pfeiltasten-Navigation. Produktionsreife Tabs brauchen zusätzlich das vollständige Tastaturverhalten und Fokusmanagement.</li>
+<li>Ein sinnvoller Context-Default fehlt absichtlich. <code>null</code> plus Guard verhindert, dass ein falsch platzierter Consumer scheinbar funktioniert.</li>
+<li>IDs aus frei gewählten Werten können normalisiert werden müssen, wenn sie später in Selektoren oder URLs auftauchen.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten. Baue beide Varianten in einer kleinen React-19.3-App. Rendere zunächst direkte Tabs, dann verschiebe sie in <code>TabList</code> und die Panels in eine eigene Layout-Komponente. Erwartung: Die Clone-Variante verliert ihre injizierten Props, während die Context-Variante weiter denselben aktiven Wert liest. Entferne anschließend den Provider; der Guard muss eine eindeutige Fehlermeldung auslösen.</p>
+<p>Prüfstand: HTML-Struktur, Codeklammern, Diagrammanzahl und Quellen wurden lokal geprüft. React-Pakete und TypeScript-Compiler waren in dieser Umgebung nicht verfügbar; deshalb wird kein Integrations- oder Compile-Test behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Kontrollierte Komponenten</strong> klären, wem der aktive Wert gehört. <strong>Reducer</strong> helfen, wenn Tabs mehr Übergänge als bloßes Auswählen besitzen. <strong>Context-Splitting</strong> trennt häufig und selten wechselnde Werte. <strong>ARIA Authoring Practices</strong> ergänzt das vollständige Tastatur- und Fokusprotokoll.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 29.10.2026: <a href="https://react.dev/blog/2026/09/09/react-19-3">React 19.3</a>, <a href="https://react.dev/reference/react/Children">React Children</a>, <a href="https://react.dev/reference/react/cloneElement">React cloneElement</a>, <a href="https://react.dev/reference/react/createContext">React createContext</a>, <a href="https://react.dev/reference/react/useContext">React useContext</a> und die <a href="https://mermaid.js.org/config/usage">offizielle Mermaid-CDN-Anleitung für Version 12</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 29.10.2026 | Compound Components brauchen einen Datenkanal, keine Kind-Manipulation | React-Komponenten-APIs | Tief;</p>
+<p>Bereich-Rotation: heute React-Komponenten-APIs → morgen z. B. Datenzugriff &amp; Race Conditions;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
