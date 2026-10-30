@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Loading ist eine Menge laufender Requests, kein Boolean</title>
+<meta name="description" content="Warum ein einzelnes isLoading bei überlappenden Requests lügt und wie Request-Identitäten den Zustand korrekt modellieren.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Loading ist eine Menge laufender Requests, kein Boolean</h1>
+<p class="subtitle">Zwei korrekte <code>finally</code>-Blöcke können gemeinsam einen falschen Ladezustand erzeugen.</p>
+<p class="meta">30.10.2026 · Datenzugriff &amp; Race Conditions · React 19.3 + TypeScript 6.0 · Tief · ~8 min</p>
+<p>Ein Nutzer startet den CSV-Export und aktualisiert direkt danach die Bestellliste. Der Export ist schnell fertig, die Liste lädt noch. Trotzdem verschwindet der globale Spinner und beide Buttons werden wieder aktiv. Kein Request ist fehlgeschlagen. Das UI lügt, weil der erste abgeschlossene Request einen Zustand beendet, den der zweite weiterhin benötigt.</p>
+
+<h2>TL;DR</h2>
+<p>Ein gemeinsames <code>isLoading</code> darf bei parallelen Operationen nicht von jedem Request unabhängig auf <code>false</code> gesetzt werden. Modelliere stattdessen die Identitäten aller laufenden Operationen und leite <code>isLoading</code> aus <code>pending.size &gt; 0</code> ab. Ein Zähler ist möglich, eine Menge ist robuster gegen doppelte Abschlussereignisse und besser diagnostizierbar. Das löst den Ladeindikator, nicht automatisch veraltete Antwortdaten oder Abbruch.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Promises, <code>async</code>/<code>await</code> und React Hooks. Die Beispiele beziehen sich auf die aktuelle <a href="https://react.dev/versions">React-Version 19.3</a> und TypeScript 6.0. Relevant sind <a href="https://react.dev/reference/react/useReducer"><code>useReducer</code></a> für den sichtbaren Zustand, <a href="https://react.dev/reference/react/useRef"><code>useRef</code></a> für eine renderunabhängige Sequenznummer und das dokumentierte Verhalten von <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/finally"><code>Promise.prototype.finally</code></a>.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p><code>isLoading</code> sieht wie ein primitiver Zustand aus, ist aber meist eine abgeleitete Frage: „Existiert mindestens eine relevante, noch nicht abgeschlossene Operation?“ Bei genau einem Request sind Boolean und Menge äquivalent. Sobald sich Lebenszeiten überlappen, verliert der Boolean die Information, welcher Request ihn gesetzt hat.</p>
+<p>Das Problem liegt nicht in <code>finally</code>. Laut MDN läuft es nach Erfüllung oder Ablehnung und eignet sich genau für Cleanup. Falsch ist nur die Cleanup-Aktion: <code>setLoading(false)</code> behauptet, dass <em>keine</em> Operation mehr läuft, obwohl der Callback lediglich über seine eigene Operation Bescheid weiß.</p>
+
+<h2>So macht man es falsch</h2>
+<p>In einer Toolbar teilen Aktualisierung und Export denselben Ladezustand. Beide Funktionen sind einzeln plausibel und setzen ihn zuverlässig zurück:</p>
+<pre><code>import { useState } from "react";
+import { exportOrders, loadOrders, type Order } from "./orders-api";
+
+export function OrdersToolbar() {
+  const [orders, setOrders] = useState&lt;Order[]&gt;([]);
+  const [isLoading, setLoading] = useState(false);
+
+  async function refresh(): Promise&lt;void&gt; {
+    setLoading(true);
+    try {
+      setOrders(await loadOrders());
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function exportCsv(): Promise&lt;void&gt; {
+    setLoading(true);
+    try {
+      await exportOrders();
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return &lt;div aria-busy={isLoading}&gt;
+    &lt;button onClick={refresh}&gt;Aktualisieren&lt;/button&gt;
+    &lt;button onClick={exportCsv}&gt;CSV exportieren&lt;/button&gt;
+    &lt;span&gt;{orders.length} Bestellungen&lt;/span&gt;
+  &lt;/div&gt;;
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Startet A vor B und endet A zuerst, schreibt A <code>false</code>, obwohl B noch pending ist. Die Reihenfolge der Abschlüsse ist legitimes asynchrones Verhalten, kein Sonderfall. Sichtbare Symptome sind flackernde Spinner, zu früh aktivierte Aktionen und irreführendes <code>aria-busy="false"</code>.</p>
+<p>Mehrere <code>setLoading(true)</code>-Aufrufe helfen nicht: Ein Boolean speichert keine Multiplizität. Auch automatisches React-Batching ändert die Semantik nicht. Das Modell kann die Information „zwei Operationen laufen“ schlicht nicht ausdrücken.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Der Tracker vergibt pro Aufruf eine Identität. Ein reiner Reducer hält eine neue <code>Set</code>-Instanz, damit React eine Zustandsänderung erkennen kann. Die Sequenznummer liegt im Ref, weil sie nicht selbst gerendert wird:</p>
+<pre><code>import { useReducer, useRef } from "react";
+
+type PendingAction =
+  | { type: "started"; id: number }
+  | { type: "finished"; id: number };
+
+function pendingReducer(
+  state: ReadonlySet&lt;number&gt;,
+  action: PendingAction
+): ReadonlySet&lt;number&gt; {
+  const next = new Set(state);
+  if (action.type === "started") next.add(action.id);
+  else next.delete(action.id);
+  return next;
+}
+
+export function useRequestTracker() {
+  const [pending, dispatch] = useReducer(
+    pendingReducer,
+    new Set&lt;number&gt;()
+  );
+  const nextId = useRef(0);
+
+  async function run&lt;T&gt;(operation: () =&gt; Promise&lt;T&gt;): Promise&lt;T&gt; {
+    const id = ++nextId.current;
+    dispatch({ type: "started", id });
+    try {
+      return await operation();
+    } finally {
+      dispatch({ type: "finished", id });
+    }
+  }
+
+  return {
+    run,
+    isLoading: pending.size &gt; 0,
+    pendingCount: pending.size
+  };
+}</code></pre>
+<p>Der Consumer ruft beispielsweise <code>await run(loadOrders)</code> und <code>await run(exportOrders)</code> auf. Endet A, entfernt der Reducer nur A. B bleibt in der Menge, also bleibt <code>isLoading</code> wahr. Ein doppeltes <code>finished</code> für dieselbe ID dekrementiert nicht versehentlich ein zweites Mal.</p>
+<p>Der Trade-off ist zusätzlicher Zustand. Ein einfacher Zähler genügt, wenn jeder Start garantiert genau einen Abschluss besitzt; er ist kürzer, zeigt aber nicht, welche Operation hängt. Für unabhängig dargestellte Bereiche sind getrennte Tracker ehrlicher als ein globaler. Starten alle Operationen bewusst als ein Batch, kann auch <code>Promise.allSettled</code> dessen gemeinsame Lebenszeit modellieren. Eine Datenbibliothek ist sinnvoll, wenn Ladezustand, Cache, Retry und Deduplizierung bereits pro Query verwaltet werden sollen.</p>
+<p>Wichtig: Der Tracker entscheidet nicht, welche Antwort Daten schreiben darf. Laden zwei Requests dieselbe Ressource, brauchst du zusätzlich eine fachliche Stale-Response-, Abbruch- oder Versionsstrategie.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart LR
+  A[Idle: 0] -- Start A --&gt; B[Pending: A]
+  B -- Start B --&gt; C[Pending: A und B]
+  C -- Ende A --&gt; D[Pending: B]
+  D -- Ende B --&gt; E[Idle: 0]
+</div>
+<figcaption>Der Ladezustand endet erst beim Übergang von einer nicht leeren zur leeren Menge. Das Ende von A entfernt ausschließlich A; es macht keine Aussage über B. Diese Erklärung bleibt ohne Diagramm vollständig.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Starte Operationen nicht während des Renderns. Ref-IDs und Dispatch gehören in Event Handler, Effects oder andere kontrollierte Aufrufpfade.</li>
+<li>Behandle Fehler im Consumer. Der Tracker reicht die ursprüngliche Erfüllung oder Ablehnung transparent weiter.</li>
+<li>Beim Unmounten brauchst du je nach Operation weiterhin Cleanup oder <code>AbortSignal</code>; eine Pending-Menge ersetzt keine Ressourcenfreigabe.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten und ersetze die API-Funktionen durch zwei steuerbare Promises. Starte A, dann B. Löse A zuerst auf und prüfe, dass <code>pendingCount</code> von zwei auf eins fällt und der Spinner sichtbar bleibt. Löse danach B auf; erst jetzt erwartest du null. Sende testweise ein zweites <code>finished</code> für A: Die Menge muss leer bleiben und darf keinen negativen Zustand erzeugen.</p>
+<p>Prüfstand: Die Zustandsfolge inklusive vertauschter Abschlussreihenfolge und doppeltem Abschluss wurde mit einem ausführbaren Node-Test geprüft. HTML-Struktur, Diagrammanzahl und Codeklammern wurden ebenfalls validiert. Mangels React-Paketen und TypeScript-Compiler wird kein React-Integrations- oder Compile-Test behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>AbortController</strong> beendet unnötige Arbeit, während der Tracker nur Sichtbarkeit modelliert. <strong>Stale-Response-Policies</strong> regeln konkurrierende Schreibrechte. <strong>Query-Key-Design</strong> definiert, welche Requests denselben Zustand teilen. <strong>Deterministische Promise-Tests</strong> erzwingen die kritische Abschlussreihenfolge.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 30.10.2026: <a href="https://react.dev/versions">React Versions – 19.3</a>, <a href="https://react.dev/reference/react/useReducer">React useReducer</a>, <a href="https://react.dev/reference/react/useRef">React useRef</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/finally">MDN Promise.prototype.finally</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 30.10.2026 | Loading ist eine Menge laufender Requests, kein Boolean | Datenzugriff &amp; Race Conditions | Tief;</p>
+<p>Bereich-Rotation: heute Datenzugriff &amp; Race Conditions → morgen z. B. TypeScript-Mapped-Types;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
