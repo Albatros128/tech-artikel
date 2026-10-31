@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Exhaustive Reducer brauchen ein geschlossenes Action-Protokoll</title>
+<meta name="description" content="Wie never vergessene Reducer-Actions sichtbar macht und warum Exhaustiveness nur an geschlossenen Grenzen korrekt ist.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Exhaustive Reducer brauchen ein geschlossenes Action-Protokoll</h1>
+<p class="subtitle">Ein freundliches <code>default: return state</code> kann eine neue, korrekt typisierte Action lautlos verschlucken.</p>
+<p class="meta">31.10.2026 · TypeScript-Discriminated-Unions · TypeScript 6.0 + React 19.3 · Tief · ~8 min</p>
+<p>Das Team ergänzt im Checkout die Action <code>shipping.selected</code>. Der Dispatch kompiliert, DevTools zeigen die Action, aber die Versandart ändert sich nicht. Der Reducer besitzt einen Default-Zweig, der den bisherigen State zurückgibt. Was als defensive Programmierung gedacht war, hat eine unvollständige Implementierung in gültiges Verhalten verwandelt.</p>
+
+<h2>TL;DR</h2>
+<p>Ist die Action-Union eines lokalen Reducers vollständig unter deiner Kontrolle, behandle sie als geschlossenes Protokoll und prüfe den Switch mit <code>never</code> auf Vollständigkeit. Eine neue Action erzeugt dann am fehlenden Case einen Compilerfehler. Für offene Protokolle – etwa ungeprüfte Nachrichten oder fremde Actions – ist ein toleranter Default dagegen legitim. Die entscheidende Frage lautet nicht „throw oder return“, sondern „ist diese Grenze geschlossen?“</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Discriminated Unions, <code>switch</code> und <code>useReducer</code>. Die Beispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> und <a href="https://react.dev/versions">React 19.3</a>. TypeScripts Handbuch dokumentiert <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#exhaustiveness-checking">Exhaustiveness Checking mit <code>never</code></a>; React beschreibt Actions als Eingaben, aus denen ein reiner <a href="https://react.dev/reference/react/useReducer">Reducer</a> den nächsten State berechnet.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p><code>never</code> ist hier keine besondere Runtime-Funktion. TypeScript verengt die Action nach jedem behandelten <code>case</code>. Sind alle Mitglieder einer geschlossenen Union entfernt, bleibt im Default-Zweig <code>never</code> übrig. Ergänzt jemand ein neues Union-Mitglied ohne passenden Case, bleibt genau dieser Typ übrig – und ist nicht mehr <code>never</code>.</p>
+<p>Damit wird eine Architekturannahme ausführbar: Dieser Reducer kennt jede Action, die ihn erreichen darf. Ein <code>default: return state</code> macht die gegenteilige Aussage: Unbekannte Actions gehören zum normalen Protokoll und sollen ignoriert werden. Beide Entscheidungen können richtig sein, aber nicht gleichzeitig an derselben Grenze.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die Union enthält bereits die neue Versand-Action. Weil der Default jeden nicht implementierten Fall akzeptiert, meldet TypeScript keinen Fehler:</p>
+<pre><code>import { useReducer } from "react";
+
+type CheckoutState = {
+  quantity: number;
+  coupon: string | null;
+  shipping: "standard" | "express";
+};
+
+type CheckoutAction =
+  | { type: "quantity.changed"; quantity: number }
+  | { type: "coupon.applied"; code: string }
+  | { type: "shipping.selected"; mode: "standard" | "express" };
+
+function checkoutReducer(
+  state: CheckoutState,
+  action: CheckoutAction
+): CheckoutState {
+  switch (action.type) {
+    case "quantity.changed":
+      return { ...state, quantity: action.quantity };
+    case "coupon.applied":
+      return { ...state, coupon: action.code };
+    default:
+      return state; // shipping.selected wird lautlos ignoriert
+  }
+}
+
+export function Checkout() {
+  const [state, dispatch] = useReducer(checkoutReducer, {
+    quantity: 1, coupon: null, shipping: "standard"
+  });
+  return &lt;button onClick={() =&gt; dispatch({
+    type: "shipping.selected", mode: "express"
+  })}&gt;Express: {state.shipping}&lt;/button&gt;;
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Der Typ des Dispatches und der Typ des Reducers versprechen, dass <code>shipping.selected</code> Teil des internen Protokolls ist. Der Default-Zweig hebt diese Zusage semantisch wieder auf. Das beobachtbare Symptom ist besonders tückisch: kein Crash, keine TypeScript-Diagnose, nur unveränderter State.</p>
+<p>Ein Test für die Versandart würde den Fehler finden, aber erst nachdem jemand den Test geschrieben und ausgeführt hat. Exhaustiveness verschiebt die Rückmeldung an die Stelle, an der die Union erweitert wird. Sie ersetzt keine Verhaltenstests; sie verhindert eine ganze Klasse vergessener Verzweigungen.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Für den lokalen Checkout ist die Action-Union geschlossen. Jeder Case wird implementiert, und ein <code>assertNever</code> markiert die Restmenge als unmöglich:</p>
+<pre><code>import { useReducer } from "react";
+
+type CheckoutState = {
+  quantity: number;
+  coupon: string | null;
+  shipping: "standard" | "express";
+};
+
+type CheckoutAction =
+  | { type: "quantity.changed"; quantity: number }
+  | { type: "coupon.applied"; code: string }
+  | { type: "shipping.selected"; mode: "standard" | "express" };
+
+function assertNever(value: never): never {
+  throw new Error(`Unbekannte Checkout-Action: ${JSON.stringify(value)}`);
+}
+
+export function checkoutReducer(
+  state: CheckoutState,
+  action: CheckoutAction
+): CheckoutState {
+  switch (action.type) {
+    case "quantity.changed":
+      return { ...state, quantity: action.quantity };
+    case "coupon.applied":
+      return { ...state, coupon: action.code };
+    case "shipping.selected":
+      return { ...state, shipping: action.mode };
+    default:
+      return assertNever(action);
+  }
+}
+
+export function Checkout() {
+  const [state, dispatch] = useReducer(checkoutReducer, {
+    quantity: 1, coupon: null, shipping: "standard"
+  });
+  return &lt;button onClick={() =&gt; dispatch({
+    type: "shipping.selected", mode: "express"
+  })}&gt;Express: {state.shipping}&lt;/button&gt;;
+}</code></pre>
+<p>Entfernst du jetzt den Versand-Case oder ergänzt eine vierte Action, ist <code>action</code> im Default nicht mehr <code>never</code>; TypeScript meldet die unvollständige Behandlung. Die Runtime-Exception bleibt sinnvoll, falls untypisiertes JavaScript oder eine fehlerhafte Assertion die Grenze umgeht.</p>
+<p>Der Trade-off ist Strenge. Kommen Events aus <code>postMessage</code>, WebSocket oder einer Plugin-Schnittstelle, ist die Welt offen. Übergib dort kein gecastetes <code>unknown</code> direkt an den Domain-Reducer. Validiere zuerst und übersetze bekannte Nachrichten in <code>CheckoutAction</code>; unbekannte Nachrichten darf die äußere Integrationsschicht protokollieren oder ignorieren. Muss der Reducer selbst fremde Actions akzeptieren, ist <code>default: return state</code> Teil seines offenen Vertrags.</p>
+<p>Eine Alternative ist ein Switch ohne Default zusammen mit explizitem Rückgabetyp und <code>noImplicitReturns</code>. Das kann fehlende Pfade melden, ist aber weniger lokal und hängt an der Compiler-Konfiguration. Eine Handler-Map kann ebenfalls exhaustiv typisiert werden, lohnt sich jedoch eher, wenn Handler als Daten konfiguriert werden.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Geschlossene Action-Union] --&gt; B[Switch verengt pro Case]
+  B -- alle Varianten behandelt --&gt; C[Resttyp never]
+  C --&gt; D[assertNever akzeptiert]
+  B -- Variante fehlt --&gt; E[Resttyp ist Action: Compilerfehler]
+</div>
+<figcaption>Die Exhaustiveness-Prüfung entsteht durch Narrowing. Nur wenn der Switch jede Variante entfernt, erreicht <code>never</code> den Default-Zweig. Diese Erklärung bleibt ohne gerendertes Diagramm vollständig.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li><code>action as never</code> beseitigt die Prüfung und macht <code>assertNever</code> wertlos.</li>
+<li>Ein zu breiter Diskriminator wie <code>type: string</code> kann nicht exhaustiv verengt werden; verwende Literaltypen.</li>
+<li>Reducer müssen rein bleiben. Logging oder Telemetrie für unbekannte externe Events gehört an die Integrationsgrenze.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten und kopiere die korrekte Variante in den TypeScript Playground mit Version 6.0. Ergänze <code>{ type: "gift.wrap.toggled"; enabled: boolean }</code> zur Union, aber noch keinen Case. Erwartung: Der Fehler erscheint bei <code>assertNever(action)</code>. Implementiere danach den Case; der Fehler verschwindet. Übergib zur Laufzeit testweise ein unbekanntes Objekt aus JavaScript und beobachte die bewusste Exception.</p>
+<p>Prüfstand: Die drei bekannten Übergänge und der Runtime-Fehler für eine unbekannte Action wurden mit Node ausgeführt. HTML-Struktur, Diagrammanzahl und Codeklammern wurden geprüft. Ein TypeScript-Compile- oder React-Integrationstest war lokal nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Runtime-Validierung</strong> schließt offene Eingabegrenzen. <strong>Discriminated State Unions</strong> verhindern unmögliche Zustandskombinationen. <strong>Command-Handler-Maps</strong> bilden exhaustive Verteilung als Daten ab. <strong>Reducer-Tests</strong> prüfen die fachlichen Ergebnisse jedes erlaubten Übergangs.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 31.10.2026: <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>, <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#exhaustiveness-checking">TypeScript Narrowing und Exhaustiveness</a>, <a href="https://react.dev/versions">React 19.3</a>, <a href="https://react.dev/reference/react/useReducer">React useReducer</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 31.10.2026 | Exhaustive Reducer brauchen ein geschlossenes Action-Protokoll | TypeScript-Discriminated-Unions | Tief;</p>
+<p>Bereich-Rotation: heute TypeScript-Discriminated-Unions → morgen z. B. React-Suspense;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
