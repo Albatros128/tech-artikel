@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein API-DTO gehört nicht in deinen Komponentenbaum</title>
+<meta name="description" content="Warum Transportdaten an der Feature-Grenze in ein stabiles internes Modell übersetzt werden sollten.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein API-DTO gehört nicht in deinen Komponentenbaum</h1>
+<p class="subtitle">Übersetze den Transportvertrag einmal an der Feature-Grenze, statt seine Sonderfälle in jeder Komponente zu wiederholen.</p>
+<p class="meta">02.11.2026 · Frontend-Architektur · TypeScript 6.0 + Web APIs · Tief · ~8 min</p>
+<p>Das Backend benennt <code>created</code> in <code>open</code> um und liefert den Bestellzeitpunkt bei historischen Datensätzen gelegentlich als <code>null</code>. Plötzlich ändern fünf Komponenten ihre Fallunterscheidungen. Eine Karte zeigt „Ungültiges Datum“, ein Dialog deaktiviert den Storno-Button anders als die Übersicht. Der Transportvertrag ist unbemerkt zur Sprache der gesamten Oberfläche geworden.</p>
+
+<h2>TL;DR</h2>
+<p>Behandle ein API-DTO als externes Format, nicht als internes Anwendungsmodell. Lies JSON als <code>unknown</code>, prüfe es an der Datenzugriffsgrenze und übersetze es dort in einen Typ mit den Invarianten, die dein Feature tatsächlich braucht. Komponenten erhalten dann ein stabiles Modell statt Netzwerk-Sonderfälle. Die zusätzliche Abbildung kostet Code und kann für sehr einfache CRUD-Oberflächen unnötig sein; sie lohnt sich, sobald Transport- und UI-Semantik auseinanderlaufen.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst <code>fetch</code>, Union-Typen und Type Guards. Die Beispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>. TypeScripts Handbuch erklärt <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html">Narrowing</a>; MDN weist darauf hin, dass <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/json"><code>Response.json()</code></a> zu jedem JSON-repräsentierbaren JavaScript-Wert auflösen kann.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Ein DTO ist nicht „das gleiche Objekt mit schlechteren Namen“. Es beschreibt, wie Daten eine technische Grenze passieren. Dein internes Modell beschreibt dagegen, welche Zustände die Anwendung akzeptiert. Wenn beide Typen identisch sind, ist das eine bewusste Vereinfachung – keine Naturgesetzlichkeit.</p>
+<p>Die Übersetzungsfunktion ist eine Anti-Corruption-Grenze im Kleinen. Sie konzentriert drei Entscheidungen: Ist die Antwort strukturell gültig? Wie werden Backend-Begriffe in Feature-Begriffe übersetzt? Welche Invarianten gelten danach? Hinter dieser Grenze muss keine Komponente mehr wissen, dass Geld als <code>total_cents</code>, Zeit als String und Status als Backend-Code ankommt.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Der Transporttyp wird direkt zum Prop-Typ. Dadurch tragen alle Konsumenten Nullable-Felder, Backend-Namen und Konvertierungslogik:</p>
+<pre><code>import type { ReactElement } from "react";
+
+type OrderDto = {
+  id: string;
+  total_cents: number | null;
+  currency: string;
+  placed_at: string | null;
+  status: "created" | "paid" | "sent" | "cancelled";
+};
+
+export function OrderCard({ dto }: { dto: OrderDto }): ReactElement {
+  const total = dto.total_cents == null
+    ? "–"
+    : new Intl.NumberFormat("de-DE", {
+        style: "currency", currency: dto.currency
+      }).format(dto.total_cents / 100);
+
+  const canCancel = dto.status === "created" || dto.status === "paid";
+  const date = dto.placed_at ? new Date(dto.placed_at).toLocaleDateString("de-DE") : "–";
+
+  return &lt;article&gt;
+    &lt;strong&gt;{total}&lt;/strong&gt; · &lt;time&gt;{date}&lt;/time&gt;
+    &lt;button disabled={!canCancel}&gt;Stornieren&lt;/button&gt;
+  &lt;/article&gt;;
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Die TypeScript-Annotation beweist nicht, dass die Netzwerkantwort diesen Typ besitzt. Noch wichtiger: Selbst bei korrektem DTO müssen mehrere Komponenten dieselben fachlichen Ableitungen reproduzieren. Aus <code>status</code> wird überall erneut <code>canCancel</code>; aus Cent und Währung wird Geld; aus einem optionalen String wird ein Zeitpunkt.</p>
+<p>Die beobachtbaren Symptome sind Drift und breite Änderungen. Zwei Komponenten interpretieren einen neuen Status unterschiedlich, ungültige Zeitstrings werden erst beim Rendern sichtbar, und ein Backend-Rename erzeugt Änderungen in UI-Dateien ohne fachlichen Grund. Der Komponentenbaum kennt damit mehr über die Transportebene als über das Feature.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Das Datenmodul akzeptiert <code>unknown</code>, validiert die tatsächlich benötigten Felder und liefert ein kleineres internes Modell. Der Ausschnitt ist ohne Schema-Bibliothek vollständig; in größeren Projekten kann dieselbe Grenze durch einen Runtime-Schema-Validator implementiert werden:</p>
+<pre><code>import type { ReactElement } from "react";
+
+type Currency = "EUR" | "USD";
+type OrderStatus = "open" | "paid" | "shipped" | "cancelled";
+
+export type Order = {
+  id: string;
+  total: { minor: number; currency: Currency };
+  placedAt: Date;
+  status: OrderStatus;
+  canCancel: boolean;
+};
+
+function record(value: unknown): Record&lt;string, unknown&gt; {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Order muss ein Objekt sein");
+  }
+  return value as Record&lt;string, unknown&gt;;
+}
+
+function text(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new Error(`${field} muss Text sein`);
+  return value;
+}
+
+export function parseOrder(input: unknown): Order {
+  const dto = record(input);
+  const minor = dto.total_cents;
+  if (!Number.isSafeInteger(minor) || (minor as number) &lt; 0) {
+    throw new Error("total_cents muss eine nichtnegative Ganzzahl sein");
+  }
+
+  const currency = text(dto.currency, "currency");
+  if (currency !== "EUR" &amp;&amp; currency !== "USD") throw new Error("Währung unbekannt");
+
+  const rawStatus = text(dto.status, "status");
+  const statusMap = {
+    created: "open", paid: "paid", sent: "shipped", cancelled: "cancelled"
+  } as const;
+  if (!(rawStatus in statusMap)) throw new Error("Status unbekannt");
+  const status = statusMap[rawStatus as keyof typeof statusMap];
+
+  const placedAt = new Date(text(dto.placed_at, "placed_at"));
+  if (Number.isNaN(placedAt.getTime())) throw new Error("Zeitpunkt ungültig");
+
+  return {
+    id: text(dto.id, "id"), total: { minor: minor as number, currency },
+    placedAt, status, canCancel: status === "open" || status === "paid"
+  };
+}
+
+export async function loadOrder(id: string, signal: AbortSignal): Promise&lt;Order&gt; {
+  const response = await fetch(`/api/orders/${encodeURIComponent(id)}`, { signal });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return parseOrder(await response.json() as unknown);
+}
+
+export function OrderCard({ order }: { order: Order }): ReactElement {
+  const total = new Intl.NumberFormat("de-DE", {
+    style: "currency", currency: order.total.currency
+  }).format(order.total.minor / 100);
+  return &lt;article&gt;
+    &lt;strong&gt;{total}&lt;/strong&gt;
+    &lt;time dateTime={order.placedAt.toISOString()}&gt;
+      {order.placedAt.toLocaleDateString("de-DE")}
+    &lt;/time&gt;
+    &lt;button disabled={!order.canCancel}&gt;Stornieren&lt;/button&gt;
+  &lt;/article&gt;;
+}</code></pre>
+<p>Nach <code>parseOrder</code> existieren weder <code>null</code>-Beträge noch unbekannte Währungen oder ungültige Zeitpunkte. Ein Backend-Rename betrifft Parser und Vertragstests, nicht jede Komponente. Formatierung bleibt bewusst in der UI, weil Locale eine Darstellungsentscheidung ist; <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat/NumberFormat"><code>Intl.NumberFormat</code></a> verwendet dafür Währung und Locale.</p>
+<p>Der Preis ist eine zweite Typwelt samt Mapping und Tests. Für ein internes Admin-CRUD, dessen Oberfläche den Backendvertrag exakt spiegelt, kann ein generierter Client direkt genügen. Eine weitere Alternative ist ein generiertes DTO plus Schema-Parser; Codegenerierung ersetzt jedoch nicht die semantische Übersetzung, wenn das Feature andere Begriffe oder Invarianten benötigt.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart LR
+  A[API-JSON] --&gt; B[unknown]
+  B --&gt; C[Parser und Übersetzung]
+  C --&gt; D[Internes Order-Modell]
+  D --&gt; E[Komponenten]
+</div>
+<figcaption>Die technische Unsicherheit endet am Parser. Dahinter arbeiten Komponenten nur noch mit dem stabilen internen Modell; diese Textbeschreibung ist zugleich der Fallback, falls Mermaid nicht geladen wird.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Ein Type Predicate ist nur so vertrauenswürdig wie seine Prüfungen; ein bloßer Cast im Predicate validiert nichts.</li>
+<li>Formatiere Geld nicht schon im Datenmodul, wenn Locale oder Währungsdarstellung zur Laufzeit wechseln können.</li>
+<li>Wirf nicht jedes unbekannte DTO-Feld weg, wenn spätere Schreiboperationen es unverändert zurücksenden müssen.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Nimm dir zehn Minuten und führe <code>parseOrder</code> mit vier Eingaben aus: einer gültigen Bestellung, <code>total_cents: null</code>, <code>placed_at: "gestern"</code> und <code>status: "refunded"</code>. Erwartung: Nur die erste Eingabe erzeugt ein <code>Order</code>; jede andere scheitert an der Feature-Grenze mit einer konkreten Meldung. Ergänze danach <code>refunded</code> absichtlich als internen Status und entscheide explizit, ob Stornieren erlaubt ist.</p>
+<p>Prüfstand: Die gültige Abbildung sowie drei ungültige Grenzfälle wurden mit Node ausgeführt. HTML-Struktur, Diagrammanzahl und Codeklammern wurden geprüft. Ein TypeScript-Compile- oder React-Integrationstest war lokal nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Runtime-Schemas</strong> skalieren Feldprüfungen und Fehlermeldungen. <strong>Generated Clients</strong> synchronisieren Transporttypen mit OpenAPI. <strong>View Models</strong> reduzieren fachliche Modelle auf einen konkreten Screen. <strong>Contract Tests</strong> erkennen Änderungen zwischen Backend und Adapter früh.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 02.11.2026: <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>, <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html">TypeScript Narrowing</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/json">MDN: Response.json()</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat/NumberFormat">MDN: Intl.NumberFormat</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 02.11.2026 | Ein API-DTO gehört nicht in deinen Komponentenbaum | Frontend-Architektur | Tief;</p>
+<p>Bereich-Rotation: heute Frontend-Architektur → morgen z. B. TypeScript-Mapped-Types;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
