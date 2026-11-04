@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein stabiles Callback kann eine stabile alte Closure sein</title>
+<meta name="description" content="Warum useCallback mit leerer Dependency-Liste externe Subscriptions nicht zuverlässig macht und wann useEffectEvent passt.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein stabiles Callback kann eine stabile alte Closure sein</h1>
+<p class="subtitle">Funktionsidentität und Aktualität sind zwei verschiedene Eigenschaften.</p>
+<p class="meta">04.11.2026 · React-Closures · React 19.3 · Tief · ~8 min</p>
+<p>Nach dem Sprachwechsel zeigt der Editor weiterhin „Gespeichert“ statt „Saved“. Der Autosave selbst arbeitet korrekt. Nur der Listener, den ein Hook beim ersten Render registriert hat, ruft noch das damalige <code>onSaved</code> auf. Im Versuch, unnötige Re-Subscriptions zu vermeiden, wurde das Callback mit <code>useCallback([])</code> „stabilisiert“ – und damit der erste Render-Snapshot konserviert.</p>
+
+<h2>TL;DR</h2>
+<p><code>useCallback</code> hält eine Funktionsdefinition nur so lange fest, wie ihre Dependencies unverändert bleiben. Eine leere Liste macht gelesene Props nicht aktuell, sondern friert die erste Closure ein. Entscheide bei externen Subscriptions zuerst, welche Werte die Subscription selbst definieren: Sie gehören in die Effect-Dependencies. Logik, die bei einem späteren Ereignis lediglich die neuesten committed Props oder States lesen soll, kann in React 19.3 als <code>useEffectEvent</code> modelliert werden.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Effects, Closures und Dependency-Arrays. Die Beispiele beziehen sich auf <a href="https://react.dev/versions">React 19.3</a>. React dokumentiert, dass <a href="https://react.dev/reference/react/useCallback"><code>useCallback</code></a> jede im Callback gelesene reaktive Dependency benötigt. <a href="https://react.dev/reference/react/useEffectEvent"><code>useEffectEvent</code></a> liest beim Aufruf die neuesten committed Werte, darf aber nur aus Effects oder anderen Effect Events heraus aufgerufen werden.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>„Stabil“ beantwortet nur: Ist es dieselbe Funktionsreferenz? „Aktuell“ beantwortet: Aus welchem Render stammen die geschlossenen Werte? Eine Funktion kann stabil und veraltet sein. Genau das passiert, wenn sie beim ersten Render erzeugt und danach dauerhaft wiederverwendet wird.</p>
+<p>Für eine Subscription brauchst du deshalb zwei Kategorien. <code>documentId</code> bestimmt, welchem Dokument der Hook zuhört; ändert es sich, muss React ab- und neu abonnieren. Die aktuelle Sprache oder ein neues <code>onSaved</code> ändern dagegen nicht die Quelle. Sie sollen erst dann gelesen werden, wenn das externe Ereignis eintritt. Das ist nicht-reaktive Effect-Logik.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Das leere Dependency-Array verschweigt, dass <code>onSaved</code> aus jedem Render neu kommt. Der Bus behält dadurch indirekt immer den ersten Callback:</p>
+<pre><code>import { useCallback, useEffect, useState, type ReactElement } from "react";
+
+type SaveResult = { version: number };
+type AutosaveBus = {
+  subscribe(id: string, listener: (result: SaveResult) =&gt; void): () =&gt; void;
+};
+declare const autosaveBus: AutosaveBus;
+
+function useAutosave(documentId: string, onSaved: (r: SaveResult) =&gt; void): void {
+  const stableOnSaved = useCallback(onSaved, []); // erste Closure bleibt erhalten
+
+  useEffect(() =&gt; {
+    return autosaveBus.subscribe(documentId, result =&gt; stableOnSaved(result));
+  }, [documentId, stableOnSaved]);
+}
+
+export function Editor(props: { documentId: string; locale: "de" | "en" }): ReactElement {
+  const [message, setMessage] = useState("");
+  useAutosave(props.documentId, result =&gt; {
+    setMessage(`${props.locale === "de" ? "Gespeichert" : "Saved"} v${result.version}`);
+  });
+  return &lt;output&gt;{message}&lt;/output&gt;;
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Beim ersten Render schließt <code>onSaved</code> die damaligen Props ein. <code>useCallback(onSaved, [])</code> gibt bei späteren Renderings weiterhin genau diese Funktion zurück. Der Effect wird für dieselbe Dokument-ID nicht neu synchronisiert, und jedes Bus-Ereignis läuft durch die alte Sprachlogik.</p>
+<p>Das beobachtbare Symptom tritt zeitversetzt auf: Render und UI zeigen bereits die neue Sprache, während WebSocket-, Timer- oder Bus-Callbacks alte Werte verwenden. Der React-Linter würde die fehlende Dependency melden. Ihn zu unterdrücken beseitigt nicht die Kausalität, sondern nur den Hinweis.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Das Effect Event bleibt direkt neben dem Effect, der es aufruft. Die Subscription reagiert auf <code>documentId</code>; das spätere Autosave-Ereignis liest dagegen das neueste <code>onSaved</code>:</p>
+<pre><code>import { useEffect, useEffectEvent, useState, type ReactElement } from "react";
+
+type SaveResult = { version: number };
+type AutosaveBus = {
+  subscribe(id: string, listener: (result: SaveResult) =&gt; void): () =&gt; void;
+};
+declare const autosaveBus: AutosaveBus;
+
+function useAutosave(documentId: string, onSaved: (r: SaveResult) =&gt; void): void {
+  const notifySaved = useEffectEvent((result: SaveResult) =&gt; {
+    onSaved(result); // liest das onSaved des neuesten committed Renders
+  });
+
+  useEffect(() =&gt; {
+    return autosaveBus.subscribe(documentId, result =&gt; notifySaved(result));
+  }, [documentId]);
+}
+
+export function Editor(props: { documentId: string; locale: "de" | "en" }): ReactElement {
+  const [message, setMessage] = useState("");
+  useAutosave(props.documentId, result =&gt; {
+    setMessage(`${props.locale === "de" ? "Gespeichert" : "Saved"} v${result.version}`);
+  });
+  return &lt;output aria-live="polite"&gt;{message}&lt;/output&gt;;
+}</code></pre>
+<p><code>notifySaved</code> gehört absichtlich nicht ins Dependency-Array. Laut React besitzt eine Effect-Event-Funktion selbst keine stabile Identität; sie ist ein besonderer nicht-reaktiver Teil der Effect-Logik, keine Memoisierungsstrategie. Übergib sie deshalb weder an Komponenten noch an andere Hooks.</p>
+<p>Die einfachste Alternative ist, <code>onSaved</code> als normale Dependency aufzunehmen. Das ist korrekt, führt bei einem inline erzeugten Callback aber bei jedem Render zu einer Ab- und Anmeldung. Wenn genau diese Neu-Synchronisierung fachlich erwünscht ist, ist sie die bessere Lösung. Für ältere React-Versionen kann ein manuell aktualisiertes Ref den neuesten Callback halten; es ist jedoch leichter, Abhängigkeiten und Commit-Zeitpunkt falsch zu modellieren.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Render 1: locale de] --&gt; B[Subscription registriert]
+  C[Render 2: locale en] --&gt; D{Externes Save-Event}
+  B -- alte Closure --&gt; D
+  D -- useCallback leer --&gt; E[Gespeichert]
+  D -- Effect Event --&gt; F[Saved]
+</div>
+<figcaption>Die Subscription kann bestehen bleiben, während das Effect Event beim späteren Aufruf die Werte des neuesten committed Renders liest. Die alte Closure liefert dagegen weiterhin die Sprache des ersten Renders.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Nutze Effect Events nicht als pauschalen Ausweg aus Dependency-Warnungen.</li>
+<li>Werte, welche die externe Verbindung oder Subscription bestimmen, bleiben reaktive Dependencies.</li>
+<li>Rufe Effect Events nicht während des Renderns auf und reiche sie nicht durch Props weiter.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Baue in zehn Minuten einen kleinen Event-Bus mit <code>subscribe</code> und <code>emit</code>. Rendere den Editor zunächst mit <code>locale="de"</code>, wechsle danach auf <code>en</code> und löse erst dann das Save-Event aus. Erwartung: Die fehlerhafte Variante meldet weiterhin „Gespeichert“, die Effect-Event-Variante „Saved“. Ändere anschließend <code>documentId</code>; nun muss genau die Subscription wechseln.</p>
+<p>Prüfstand: Das Closure-Modell wurde mit erstem und neuestem Callback unter Node ausgeführt. HTML-Struktur, Diagrammanzahl und Codeklammern wurden geprüft. Ein React-Integrations- oder TypeScript-Compile-Test war lokal nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Effect-Dependencies</strong> beschreiben Synchronisierungsursachen. <strong>Funktionale State-Updates</strong> lösen veraltete Berechnungen aus vorherigem State. <strong>Refs</strong> speichern mutable Werte außerhalb des Render-Snapshots. <strong>Subscription-Tests</strong> erzwingen die Reihenfolge Render, Prop-Wechsel und externes Ereignis.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 04.11.2026: <a href="https://react.dev/versions">React 19.3</a>, <a href="https://react.dev/reference/react/useCallback">React: useCallback</a>, <a href="https://react.dev/reference/react/useEffectEvent">React: useEffectEvent</a>, <a href="https://react.dev/learn/separating-events-from-effects">Separating Events from Effects</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 04.11.2026 | Ein stabiles Callback kann eine stabile alte Closure sein | React-Closures | Tief;</p>
+<p>Bereich-Rotation: heute React-Closures → morgen z. B. Frontend-Tests;</p>
+<p>Unsicher geblieben: nichts.</p>
+</footer>
+</main></body></html>
