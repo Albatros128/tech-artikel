@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein deaktivierter Button braucht eine bewusste Fokusentscheidung</title>
+<meta name="description" content="Wann ein React-Button natives disabled braucht und wann aria-disabled plus Beschreibung die zugänglichere Komponenten-API ergibt.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein deaktivierter Button braucht eine bewusste Fokusentscheidung</h1>
+<p class="subtitle"><code>disabled</code> und <code>aria-disabled</code> beschreiben nicht nur einen Zustand, sondern zwei verschiedene Interaktionsverträge.</p>
+<p class="meta">05.11.2026 · Accessibility &amp; Komponenten-APIs · React 19.3 / WAI-ARIA 1.2 · Tief · ~8 min</p>
+<p>Im Veröffentlichungsdialog bleibt der primäre Button grau, bis Titel, Freigabe und Zielgruppe vollständig sind. Mit der Maus erscheint über <code>title</code> ein Hinweis. Wer jedoch per Tab navigiert, überspringt den Button und erfährt nicht, welche Bedingung noch fehlt. Technisch ist die Aktion deaktiviert; fachlich ist ihre Unerreichbarkeit das eigentliche Problem.</p>
+
+<h2>TL;DR</h2>
+<p>Nutze natives <code>disabled</code>, wenn ein Form-Control wirklich aus Bedienung, Fokusreihenfolge und Formularübermittlung verschwinden soll. Soll eine wichtige, momentan nicht ausführbare Aktion auffindbar bleiben, verwende auf dem nativen <code>&lt;button&gt;</code> bewusst <code>aria-disabled="true"</code>, eine sichtbare und über <code>aria-describedby</code> verknüpfte Begründung sowie einen Handler, der die Aktion tatsächlich verhindert. ARIA liefert Semantik, nicht Verhalten.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst React-Eventhandler, semantisches HTML und discriminated unions. Das Beispiel bezieht sich auf <a href="https://react.dev/versions">React 19.3</a> und die normative <a href="https://www.w3.org/TR/wai-aria/#aria-disabled">WAI-ARIA-1.2-Definition von <code>aria-disabled</code></a>. Die Unterschiede zum nativen Attribut dokumentiert außerdem <a href="https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/disabled">MDN zu <code>disabled</code></a>.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>„Kann nicht aktiviert werden“ ist nur eine Hälfte der Entscheidung. Die andere lautet: „Soll diese Aktion beim Erkunden der Oberfläche gefunden werden?“ Ein natives deaktiviertes Form-Control ist nicht fokussierbar und wird nicht mit dem Formular übertragen. <code>aria-disabled</code> meldet Assistenztechnik lediglich den deaktivierten Zustand; es entfernt den Button weder aus der Fokusreihenfolge noch unterbindet es Klicks.</p>
+<p>Damit wird die Wahl zu einer Produktentscheidung. Ein „Speichern“-Button während eines bereits laufenden Saves darf oft vollständig aus der Interaktion fallen. Ein „Veröffentlichen“-Button, dessen Voraussetzungen der Nutzer noch erfüllen muss, sollte dagegen auffindbar sein und den Grund erklären.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die verbreitete Kombination aus nativem <code>disabled</code> und <code>title</code> wirkt plausibel, macht die Erklärung aber von einem Element abhängig, das per Tastatur keinen Fokus erhält:</p>
+<pre><code>import type { ReactElement } from "react";
+
+type PublishButtonProps = {
+  canPublish: boolean;
+  onPublish: () =&gt; void;
+};
+
+export function PublishButton({
+  canPublish,
+  onPublish,
+}: PublishButtonProps): ReactElement {
+  const reason = "Titel und Zielgruppe fehlen noch";
+
+  return (
+    &lt;button
+      type="button"
+      disabled={!canPublish}
+      title={!canPublish ? reason : undefined}
+      onClick={onPublish}
+    &gt;
+      Veröffentlichen
+    &lt;/button&gt;
+  );
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Für das Verhindern der Aktion ist der Code korrekt: Der Browser übernimmt Semantik und Verhalten. Falsch ist die Annahme, der Button könne zugleich als fokussierbarer Träger seiner Erklärung dienen. Das native Attribut entfernt ihn aus der Tab-Reihenfolge; eine reine Hover-Erklärung erreicht Tastaturnutzer nicht zuverlässig.</p>
+<p>Das Symptom zeigt sich nicht als Exception, sondern als Informationslücke: Der Fokus springt vom letzten Eingabefeld zur nächsten Aktion. Die zentrale Schaltfläche und ihr Grund bleiben unsichtbar. Ein Wrapper mit Tooltip verschiebt das Problem häufig nur, weil dann der Wrapper fokussierbar und benannt werden müsste.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Die Komponenten-API modelliert Verfügbarkeit und Grund als Union. Dadurch kann ein nicht verfügbarer Zustand nicht ohne Erklärung erzeugt werden. Der sichtbare Text ist zugleich die zugängliche Beschreibung:</p>
+<pre><code>import { useId, type ReactElement } from "react";
+
+type PublishState =
+  | { status: "ready"; onPublish: () =&gt; void }
+  | { status: "unavailable"; reason: string };
+
+export function PublishButton({ state }: { state: PublishState }): ReactElement {
+  const reasonId = useId();
+  const unavailable = state.status === "unavailable";
+
+  function handleClick(): void {
+    if (state.status === "unavailable") return;
+    state.onPublish();
+  }
+
+  return (
+    &lt;div&gt;
+      &lt;button
+        type="button"
+        aria-disabled={unavailable || undefined}
+        aria-describedby={unavailable ? reasonId : undefined}
+        onClick={handleClick}
+      &gt;
+        Veröffentlichen
+      &lt;/button&gt;
+      {state.status === "unavailable" &amp;&amp; (
+        &lt;p id={reasonId}&gt;{state.reason}&lt;/p&gt;
+      )}
+    &lt;/div&gt;
+  );
+}</code></pre>
+<p>Die Guard Clause ist zwingend: <code>aria-disabled</code> ändert nur die Accessibility-Semantik. Der native Button bleibt fokussierbar und erzeugt bei Maus- oder Tastaturaktivierung weiterhin ein Click-Ereignis. Style den Zustand zusätzlich mit <code>[aria-disabled="true"]</code>, aber entferne nicht einfach per <code>pointer-events: none</code> nur einen Eingabepfad.</p>
+<p>Der Trade-off ist mehr Verantwortung: Verhalten, Darstellung und Tests liegen bei deiner Komponente. Wenn die Aktion nicht erklärt oder entdeckt werden muss, ist natives <code>disabled</code> robuster. Für mehrere zusammenhängende Form-Controls kann ein deaktiviertes <code>&lt;fieldset&gt;</code> die semantisch bessere Alternative sein.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A{Soll die Aktion im Fokus auffindbar bleiben?}
+  A -- Nein --&gt; B[Natives disabled]
+  A -- Ja --&gt; C[aria-disabled und Beschreibung]
+  C -- Semantik --&gt; D[Assistenztechnik meldet deaktiviert]
+  C -- Verhalten --&gt; E[Handler blockiert Aktivierung]
+</div>
+<figcaption>Die Entscheidung beginnt bei der gewünschten Auffindbarkeit. Bei <code>aria-disabled</code> müssen Semantik und tatsächlich blockiertes Verhalten getrennt umgesetzt werden.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Setze <code>aria-disabled</code> nicht unbedacht auf Container: Der Zustand gilt semantisch auch für fokussierbare Nachfahren.</li>
+<li>Verwende weiterhin ein echtes <code>&lt;button&gt;</code>; ein <code>&lt;div role="button"&gt;</code> erzeugt zusätzliche Tastatur- und Fokusarbeit.</li>
+<li>Eine Beschreibung erklärt den Zustand, ersetzt aber keine sichtbare Validierung an den verursachenden Feldern.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Rendere beide Varianten nebeneinander, setze den Status auf nicht verfügbar und navigiere fünf Minuten lang ausschließlich mit Tab und Enter. Erwartung: Das native <code>disabled</code> wird übersprungen. Die ARIA-Variante erhält Fokus, bleibt bei Enter wirkungslos und verweist über <code>aria-describedby</code> auf den sichtbaren Grund. Teste danach den Ready-Zustand: Der Handler darf genau einmal laufen.</p>
+<p>Prüfstand: HTML-Struktur, Diagrammanzahl, Codeklammern und die Zustands-Guard wurden lokal geprüft. Ein Browser-/Screenreader-Integrationstest oder TypeScript-Compile-Test war lokal nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Zugängliche Beschreibungen</strong> ergänzen Namen um Kontext. <strong>Fokusmanagement</strong> entscheidet, was per Tastatur erkundbar ist. <strong>Formularvalidierung</strong> verankert Ursachen an Feldern statt nur am Submit-Button. <strong>Discriminated unions</strong> machen unvollständige Komponenten-Zustände unformulierbar.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 05.11.2026: <a href="https://react.dev/versions">React 19.3</a>, <a href="https://www.w3.org/TR/wai-aria/#aria-disabled">WAI-ARIA 1.2: <code>aria-disabled</code></a>, <a href="https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-disabled">MDN: <code>aria-disabled</code></a>, <a href="https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/disabled">MDN: HTML <code>disabled</code></a>, <a href="https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-describedby">MDN: <code>aria-describedby</code></a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 05.11.2026 | Ein deaktivierter Button braucht eine bewusste Fokusentscheidung | Accessibility &amp; Komponenten-APIs | Tief;</p>
+<p>Bereich-Rotation: heute Accessibility &amp; Komponenten-APIs → morgen z. B. TypeScript-Typsystem;</p>
+<p>Unsicher geblieben: Browser-/Screenreader-Verhalten wurde nicht praktisch getestet.</p>
+</footer>
+</main></body></html>
