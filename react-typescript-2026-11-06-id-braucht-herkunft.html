@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eine ID braucht eine Herkunft, nicht nur einen String</title>
+<meta name="description" content="Wie Branded Types UserId und OrderId trennen, warum as kein Beweis ist und weshalb das Branding an eine validierte Grenze gehört.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Eine ID braucht eine Herkunft, nicht nur einen String</h1>
+<p class="subtitle">Branded Types verhindern vertauschte Identitäten – sofern du den Brand nicht mit einem beliebigen Cast verschenkst.</p>
+<p class="meta">06.11.2026 · TypeScript-API-Modellierung · TypeScript 6.0 · Tief · ~8 min</p>
+<p>Die Detailseite einer Bestellung enthält einen Link zum Käufer. Beim Refactoring wird versehentlich <code>order.id</code> statt <code>order.buyerId</code> übergeben. Beide Werte sind gültige UUID-Strings, der Compiler bleibt ruhig und die Anwendung navigiert zu einem Benutzer, den es nicht gibt. Der Fehler steckt nicht im Format der ID, sondern in ihrer Herkunft.</p>
+
+<h2>TL;DR</h2>
+<p>Wenn mehrere fachliche Identitäten dieselbe Laufzeitrepräsentation besitzen, reicht <code>string</code> als Vertrag nicht. Ein Branded Type ergänzt eine nur für TypeScript sichtbare Herkunft und verhindert, dass <code>OrderId</code> als <code>UserId</code> verwendet wird. Erzeuge den Brand ausschließlich in kleinen Konstruktoren an validierten Grenzen. Ein frei verteilter Cast <code>as UserId</code> macht aus einer Behauptung keinen Beweis.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst strukturelle Typisierung, Intersections und <code>unknown</code>. Die Beispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>. Das Handbook dokumentiert <a href="https://www.typescriptlang.org/docs/handbook/2/objects.html#intersection-types">Intersection Types</a>, die eigene Identität von <a href="https://www.typescriptlang.org/docs/handbook/symbols.html#unique-symbol"><code>unique symbol</code></a> sowie <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#using-type-predicates">benutzerdefinierte Narrowing-Grenzen</a>.</p>
+<pre><code>// tsconfig.json – Prüfkonfiguration
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "strict": true,
+    "noEmit": true
+  },
+  "files": ["ids.ts"]
+}</code></pre>
+
+<h2>Der Aha-Effekt</h2>
+<p>TypeScript ist strukturell: Zwei Typen mit derselben Struktur sind grundsätzlich kompatibel. Für DTOs ist das bequem, für Identitäten manchmal zu großzügig. Ein Brand fügt dem String eine Phantom-Property hinzu, deren Schlüssel ein <code>unique symbol</code> ist. <code>UserId</code> und <code>OrderId</code> sind dadurch für den Compiler verschieden, bleiben zur Laufzeit aber normale Strings.</p>
+<p>Entscheidend ist nicht die Syntax des Brands, sondern seine Ausgabestelle. Der Typ bedeutet: „Dieser Wert wurde als User-ID akzeptiert.“ Diese Aussage ist nur belastbar, wenn ausschließlich eine kontrollierte Grenze sie erzeugen darf.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Ein reiner String-Vertrag lässt die Vertauschung zu. Die Namen der Parameter helfen beim Lesen, sind aber kein Teil der Zuweisungsprüfung:</p>
+<pre><code>type Order = {
+  id: string;
+  buyerId: string;
+};
+
+declare function navigateToUser(userId: string): void;
+
+function openBuyer(order: Order): void {
+  navigateToUser(order.id); // kompiliert, fachlich falsch
+}</code></pre>
+<p>Auch ein Brand kann falsch eingesetzt werden. Wer an jeder Aufrufstelle <code>value as UserId</code> schreibt, deaktiviert genau die Prüfung, die das Muster liefern soll.</p>
+
+<h2>Warum ist das falsch?</h2>
+<p>Die Laufzeitrepräsentation enthält keine Information darüber, aus welcher Spalte oder welchem JSON-Feld der String stammt. Ein UUID-RegEx kann Form prüfen, aber nicht entscheiden, ob die ID einen Benutzer oder eine Bestellung bezeichnet. Ohne zusätzlichen Typ sind beide Werte zuweisbar; mit einem beliebigen Cast akzeptiert der Compiler lediglich deine unbelegte Zusicherung.</p>
+<p>Das beobachtbare Symptom erscheint oft spät: Der Request ist syntaktisch gültig, liefert aber 404, fremde Daten oder einen Cache-Miss. Solche Fehler sind besonders schwer zu erkennen, wenn verschiedene Ressourcen dasselbe ID-Format und dieselben Routing-Konventionen verwenden.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Der Brand und die unsicheren Casts bleiben in einem Grenzmodul. Außenstehender Code erhält nur Konstruktoren, die zunächst den Laufzeitwert prüfen:</p>
+<pre><code>// ids.ts
+declare const identityBrand: unique symbol;
+
+type Identity&lt;Name extends string&gt; = string &amp; {
+  readonly [identityBrand]: Name;
+};
+
+export type UserId = Identity&lt;"UserId"&gt;;
+export type OrderId = Identity&lt;"OrderId"&gt;;
+
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function requireUuid(value: unknown, label: string): string {
+  if (typeof value !== "string" || !uuid.test(value)) {
+    throw new TypeError(`${label} ist keine gültige UUID`);
+  }
+  return value;
+}
+
+export function userIdFromApi(value: unknown): UserId {
+  return requireUuid(value, "userId") as UserId;
+}
+
+export function orderIdFromApi(value: unknown): OrderId {
+  return requireUuid(value, "orderId") as OrderId;
+}
+
+declare function navigateToUser(userId: UserId): void;
+declare const orderId: OrderId;
+
+// navigateToUser(orderId); // erwarteter Typfehler
+navigateToUser(userIdFromApi("550e8400-e29b-41d4-a716-446655440000"));</code></pre>
+<p>Der Cast ist hier kein Ersatz für Validierung, sondern die gekapselte Übergabe vom geprüften Laufzeitwert an den Compile-Time-Vertrag. Bei einem kompletten API-DTO sollte außerdem die Objektstruktur geprüft werden, damit der richtige Konstruktor am richtigen Feld sitzt.</p>
+<p>Der Trade-off ist Reibung an Grenzen: Router-Parameter, Formulare und Testdaten müssen gebrandet werden. Für wenige IDs lohnt das Muster oft nicht. Eine Wrapper-Struktur wie <code>{ kind: "user", value: string }</code> trägt die Identität auch zur Laufzeit, kostet aber Objektallokation und explizite Serialisierung. Schema-Bibliotheken können Validierung und Branding koppeln, fügen jedoch eine Abhängigkeit hinzu.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Unbekanntes API-JSON] --&gt; B{UUID und Feldstruktur gültig?}
+  B -- Nein --&gt; C[Fehler an der Grenze]
+  B -- Ja --&gt; D[UserId wird erzeugt]
+  D --&gt; E[Domain-Funktionen akzeptieren nur UserId]
+</div>
+<figcaption>Der Brand entsteht erst nach der Laufzeitprüfung. Danach transportiert TypeScript die bestätigte fachliche Herkunft durch den Anwendungscode.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Brands verschwinden beim Emit und schützen weder Datenbank noch Netzwerk.</li>
+<li>Ein <code>as</code> außerhalb der Konstruktoren unterläuft die Vertrauensgrenze.</li>
+<li>Gleiche UUID-Formate beweisen keine fachliche Herkunft; dafür bleibt der API-Vertrag verantwortlich.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Lege den Ausschnitt in <code>ids.ts</code> ab und entferne den Kommentar vor <code>navigateToUser(orderId)</code>. Erwartung: TypeScript meldet, dass <code>OrderId</code> nicht als <code>UserId</code> zuweisbar ist. Übergib danach <code>"123"</code> an <code>userIdFromApi</code>; zur Laufzeit muss ein <code>TypeError</code> entstehen. Die Übung dauert etwa zehn Minuten.</p>
+<p>Prüfstand: Die UUID-Grenze wurde unter Node mit gültigen und ungültigen Werten ausgeführt; HTML-Struktur, Diagrammanzahl und Codeklammern wurden geprüft. Ein TypeScript-Compile-Test war lokal mangels Compiler nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Runtime-Schemas</strong> prüfen ganze DTOs statt einzelner Werte. <strong>Opaque Types</strong> verbergen zusätzlich die Repräsentation hinter Modulgrenzen. <strong>Value Objects</strong> tragen Verhalten und Invarianten zur Laufzeit. <strong>Typ-Prädikate</strong> erlauben kontrolliertes Narrowing ohne pauschale Casts.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 06.11.2026: <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>, <a href="https://www.typescriptlang.org/docs/handbook/2/objects.html#intersection-types">TypeScript Handbook: Intersection Types</a>, <a href="https://www.typescriptlang.org/docs/handbook/symbols.html#unique-symbol">TypeScript Handbook: <code>unique symbol</code></a>, <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#using-type-predicates">TypeScript Handbook: Narrowing</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 06.11.2026 | Eine ID braucht eine Herkunft, nicht nur einen String | TypeScript-API-Modellierung | Tief;</p>
+<p>Bereich-Rotation: heute TypeScript-API-Modellierung → morgen z. B. React-Render-Verhalten;</p>
+<p>Unsicher geblieben: Der erwartete TypeScript-Typfehler wurde mangels lokalem Compiler nicht praktisch verifiziert.</p>
+</footer>
+</main></body></html>
