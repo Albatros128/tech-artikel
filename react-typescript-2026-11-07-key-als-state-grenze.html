@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein key ist eine State-Grenze, kein Listen-Hack</title>
+<meta name="description" content="Warum ein fachlicher Identitätswechsel in React oft einen neuen Komponentenbaum verlangt und wann ein key der sauberere Reset als ein Effect ist.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein key ist eine State-Grenze, kein Listen-Hack</h1>
+<p class="subtitle">Wenn die fachliche Identität wechselt, darf React den alten Komponenten-State nicht immer weitertragen.</p>
+<p class="meta">07.11.2026 · React-State-Modellierung · React 19.3 · Tief · ~8 min</p>
+<p>Du öffnest Kunde A in einem Seitendialog, änderst die Adresse und wechselst ohne Speichern zu Kunde B. Der Titel zeigt bereits B, im Formular steht noch der Entwurf von A. Ein Effect kopiert die neuen Props kurz darauf in den lokalen State und scheint das Problem zu lösen. Doch für einen Render existieren neue Identität und alter Entwurf gleichzeitig – und ein aufgeklappter Abschnitt im Kind bleibt trotzdem offen.</p>
+
+<h2>TL;DR</h2>
+<p>React ordnet State einer Position im UI-Baum zu. Bleiben Komponententyp und Position gleich, bleibt auch der lokale State erhalten, selbst wenn die Props eine andere Entität beschreiben. Wenn ein Entitätswechsel den gesamten lokalen Teilbaum neu beginnen soll, gib der inneren Komponente einen fachlichen <code>key</code>. Ein neuer Schlüssel erzeugt eine neue Identität und setzt State sowie DOM unterhalb dieser Grenze zurück. Das ist eine semantische Entscheidung, keine Optimierung.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst <code>useState</code>, <code>useEffect</code> und kontrollierte Formulare. Die Beispiele beziehen sich auf <a href="https://react.dev/versions">React 19.3</a>. Relevant sind Reacts Erklärungen zum <a href="https://react.dev/learn/preserving-and-resetting-state">Erhalten und Zurücksetzen von State</a> sowie zu Fällen, in denen du <a href="https://react.dev/learn/you-might-not-need-an-effect">keinen Effect brauchst</a>.</p>
+
+<h2>Der Aha-Effekt</h2>
+<p>Props beantworten: „Welche Daten soll diese Instanz jetzt darstellen?“ Ein <code>key</code> beantwortet die grundlegendere Frage: „Ist das noch dieselbe Instanz?“ React dokumentiert, dass State an die Position im Render-Baum gebunden ist. Der Schlüssel wird Teil dieser Identität. Ändert er sich, wird der Teilbaum nicht aktualisiert, sondern neu aufgebaut.</p>
+<p>Damit modellierst du eine fachliche Grenze: Ein Editor für Kunde A und ein Editor für Kunde B sind nicht zwei Zustände desselben Editors, sondern zwei verschiedene Arbeitskontexte. Der Reset umfasst automatisch jeden lokalen State darunter – auch Validierungsfehler, offene Akkordeons und nicht kontrollierte DOM-Eingaben.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die verbreitete Lösung spiegelt die neuen Props nachträglich in lokalen State:</p>
+<pre><code>import { useEffect, useState } from "react";
+
+type Customer = { id: string; name: string; email: string };
+
+export function CustomerEditor({ customer }: { customer: Customer }) {
+  const [draft, setDraft] = useState(customer);
+
+  useEffect(() =&gt; {
+    setDraft(customer);
+  }, [customer]);
+
+  return (
+    &lt;form&gt;
+      &lt;h2&gt;{customer.name} bearbeiten&lt;/h2&gt;
+      &lt;input
+        value={draft.email}
+        onChange={event =&gt;
+          setDraft({ ...draft, email: event.target.value })
+        }
+      /&gt;
+      &lt;AdvancedFields customerId={customer.id} /&gt;
+    &lt;/form&gt;
+  );
+}</code></pre>
+<p>Das ist kein unrealistischer Sonderfall: Ein Formular soll absichtliche Änderungen lokal halten, erhält aber beim Wechsel einen neuen Datensatz. Der Effect repariert nur den State, den er kennt.</p>
+
+<h2>Warum ist das falsch?</h2>
+<p>Effects laufen nach dem Commit. React beschreibt deshalb bei diesem Muster zunächst einen Render mit veraltetem State und anschließend einen weiteren Render durch <code>setDraft</code>. Sichtbares Flackern ist nicht garantiert, aber die Zwischenkombination existiert und Kindkomponenten können damit arbeiten. Außerdem bleiben unabhängige State-Zellen wie <code>AdvancedFields</code> erhalten.</p>
+<p>Noch gefährlicher ist die unklare Semantik: Soll ein Hintergrund-Refresh denselben Entwurf überschreiben? Soll der Wechsel zu einer anderen Kundennummer alles verwerfen? Der Effect behandelt jede Änderung am Objekt gleich. Die eigentliche Designentscheidung – gleiche oder neue Arbeitsidentität – verschwindet in Synchronisierungslogik.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Trenne die Auswahl vom zustandsbehafteten Editor. Der äußere Teil kennt die fachliche Identität und setzt dort die Grenze:</p>
+<pre><code>import { useState } from "react";
+
+type Customer = { id: string; name: string; email: string };
+
+export function CustomerPanel({ customer }: { customer: Customer }) {
+  return &lt;CustomerEditor key={customer.id} customer={customer} /&gt;;
+}
+
+function CustomerEditor({ customer }: { customer: Customer }) {
+  const [draft, setDraft] = useState(() =&gt; ({ ...customer }));
+
+  return (
+    &lt;form&gt;
+      &lt;h2&gt;{customer.name} bearbeiten&lt;/h2&gt;
+      &lt;label&gt;
+        E-Mail
+        &lt;input
+          value={draft.email}
+          onChange={event =&gt;
+            setDraft({ ...draft, email: event.target.value })
+          }
+        /&gt;
+      &lt;/label&gt;
+      &lt;AdvancedFields customerId={customer.id} /&gt;
+    &lt;/form&gt;
+  );
+}</code></pre>
+<p>Beim Wechsel der ID entsteht ein neuer Editor; sein Initializer liest genau einmal den neuen Kunden. Der Trade-off ist vollständig: Fokus, Textauswahl, Undo-Historie und jeder lokale Kind-State gehen verloren. Genau deshalb darf der Schlüssel nicht beiläufig wechseln.</p>
+<p>Sollen Entwürfe beim Zurückwechseln erhalten bleiben, speichere sie oberhalb der Grenze, etwa als <code>Record&lt;CustomerId, Draft&gt;</code>, oder in einem externen Store. Soll nur ein Teil zurückgesetzt werden, ist ein expliziter Reducer-Reset präziser. Und wenn Props nur berechenbare Anzeigeinformationen liefern, berechne sie im Render statt sie überhaupt in State zu kopieren.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Kunde A an derselben Position] --&gt; B[Lokaler Entwurf A]
+  C[Prop wechselt zu Kunde B] --&gt; D{Komponentenidentität}
+  D -- gleicher key --&gt; B
+  D -- neuer key --&gt; E[Neuer Entwurf B]
+</div>
+<figcaption>Ohne neue Identität bleibt der vorhandene State an seiner Baumposition. Ein anderer fachlicher Schlüssel eröffnet einen neuen Arbeitskontext.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Ein zufälliger Schlüssel wie <code>Math.random()</code> remountet bei jedem Render und zerstört Eingaben.</li>
+<li>Ein <code>key</code> ist für das Kind kein normales Prop; übergib die ID zusätzlich, wenn es sie benötigt.</li>
+<li>Ein Reset löst keine Persistenzfrage. Ungespeicherte Änderungen brauchen gegebenenfalls eine Warnung.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Baue in zehn Minuten zwei Kundenbuttons und den Editor aus dem Beispiel. Tippe einen Entwurf für A, öffne <code>AdvancedFields</code> und wechsle zu B. Ohne <code>key</code> bleiben beide lokalen Zustände erhalten. Ergänze <code>key={customer.id}</code>: Erwartung ist ein frischer B-Entwurf und ein zurückgesetztes Kind. Wechsle danach zurück zu A; der alte Entwurf ist ebenfalls weg. Hebe ihn anschließend nach oben, um die Alternative bewusst zu testen.</p>
+<p>Prüfstand: Die Identitätsmechanik wurde mit einem kleinen Zustandsmodell unter Node geprüft; HTML-Struktur, Überschriftenfolge, Diagrammanzahl und Wortumfang wurden automatisiert kontrolliert. Ein React-DOM-Integrationstest und ein TSX-Compile-Test waren lokal nicht verfügbar und werden nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Controlled Components</strong> verschieben die Lebensdauer des Entwurfs zum Elternteil. <strong>Reducer-Resets</strong> erlauben selektive Übergänge statt eines kompletten Remounts. <strong>State Colocation</strong> entscheidet, welche Grenze den Zustand besitzen soll. <strong>Router-Keys</strong> können dieselbe Identitätsentscheidung an Parametern oder Ressourcen festmachen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 07.11.2026: <a href="https://react.dev/versions">React Versions: 19.3</a>, <a href="https://react.dev/blog/2026/09/09/react-19-3">React 19.3 Release</a>, <a href="https://react.dev/learn/preserving-and-resetting-state">Preserving and Resetting State</a>, <a href="https://react.dev/learn/you-might-not-need-an-effect">You Might Not Need an Effect</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 07.11.2026 | Ein key ist eine State-Grenze, kein Listen-Hack | React-State-Modellierung | Tief;</p>
+<p>Bereich-Rotation: heute React-State-Modellierung → morgen z. B. Datenzugriff und Race Conditions;</p>
+<p>Unsicher geblieben: Ein React-DOM-Integrationstest und ein TSX-Compile-Test waren lokal nicht verfügbar.</p>
+</footer>
+</main></body></html>
