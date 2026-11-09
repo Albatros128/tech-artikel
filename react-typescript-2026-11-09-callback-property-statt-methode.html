@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein Callback ist als Property strenger als als Methode</title>
+<meta name="description" content="Warum TypeScript Callback-Methoden absichtlich bivarianter prüft und Funktions-Properties für Consumer-APIs die sicherere Grenze sind.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein Callback ist als Property strenger als als Methode</h1>
+<p class="subtitle">Eine kleine Syntaxentscheidung bestimmt, ob <code>strictFunctionTypes</code> zu enge Event-Handler abweist.</p>
+<p class="meta">09.11.2026 · TypeScript-Typsystem · TypeScript 6.0 · Tief · ~8 min</p>
+<p>Eine Editor-Komponente meldet Texteingaben und Tastenkürzel über denselben Event-Kanal. Ein bestehender Handler kennt nur Texteingaben und greift sofort auf <code>event.value</code> zu. Beim Refactoring wird er als allgemeiner Handler registriert; TypeScript akzeptiert die Zuweisung. Erst beim ersten Tastenkürzel scheitert der Code zur Laufzeit. Das Überraschende: <code>strict: true</code> war aktiv.</p>
+
+<h2>TL;DR</h2>
+<p>Unter <code>strictFunctionTypes</code> werden Parameter normaler Funktionstypen kontravariant geprüft: Ein Consumer darf nicht weniger Eingaben verstehen als sein Aufrufer liefern kann. TypeScript nimmt Methoden aus dieser strengeren Prüfung aus und behandelt ihre Parameter bivariant. Definiere öffentliche Callback- und Handler-APIs deshalb als Funktions-Properties – <code>handle: (event: T) =&gt; void</code> – wenn die sichere Richtung der Zuweisung wichtig ist.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst strukturelle Typisierung, Generics und discriminated unions. Die Beispiele nutzen <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> mit <code>strict: true</code>. Die relevante Ausnahme ist in der TSConfig-Referenz zu <a href="https://www.typescriptlang.org/tsconfig/strictFunctionTypes.html"><code>strictFunctionTypes</code></a> und den <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-2-6.html#strict-function-types">TypeScript-2.6-Release-Notes</a> dokumentiert.</p>
+<pre><code>// tsconfig.json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022"
+  },
+  "files": ["handlers.ts"]
+}</code></pre>
+
+<h2>Der Aha-Effekt</h2>
+<p>Ein Handler ist ein Consumer. Wenn die Komponente jedes <code>EditorEvent</code> senden darf, muss der Handler ebenfalls jedes <code>EditorEvent</code> akzeptieren. Ein Handler, der nur <code>TextChanged</code> versteht, ist dafür zu speziell. Die sichere Zuweisungsrichtung läuft bei Eingabeparametern entgegen der Vererbungsrichtung – das ist Kontravarianz.</p>
+<p>Methodensyntax sieht fast gleich aus, hat aber andere Zuweisungsregeln. TypeScript lässt Methoden aus Kompatibilitätsgründen bivariant; unter anderem bleiben dadurch generische Klassen und DOM-Hierarchien praktikabel. Diese Ausnahme ist dokumentiert, aber in einer Callback-API leicht zu übersehen.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die Methodensyntax lockert die Prüfung. Der folgende spezialisierte Handler kann als allgemeiner Handler durchrutschen:</p>
+<pre><code>type TextChanged = { kind: "text"; value: string };
+type Shortcut = { kind: "shortcut"; command: "save" | "undo" };
+type EditorEvent = TextChanged | Shortcut;
+
+interface MethodHandler&lt;T&gt; {
+  handle(event: T): void;
+}
+
+const textOnly: MethodHandler&lt;TextChanged&gt; = {
+  handle(event) {
+    console.log(event.value.toLowerCase());
+  },
+};
+
+const unsafe: MethodHandler&lt;EditorEvent&gt; = textOnly; // erlaubt
+unsafe.handle({ kind: "shortcut", command: "save" }); // Laufzeitfehler</code></pre>
+<p>Das Beispiel ist kein künstlicher Cast. Die problematische Information geht bei einer regulären Zuweisung zwischen zwei Instanzen desselben generischen Interfaces verloren.</p>
+
+<h2>Warum ist das falsch?</h2>
+<p>Der Aufrufer hält einen <code>MethodHandler&lt;EditorEvent&gt;</code> und darf daher beide Union-Mitglieder übergeben. Das konkrete Objekt kann aber nur eines davon verarbeiten. Bivarianz akzeptiert sowohl die sichere als auch die unsichere Richtung, obwohl die Implementierung beim <code>Shortcut</code> kein <code>value</code> erhält.</p>
+<p>Das Symptom erscheint typischerweise nach einer API-Erweiterung: Ein Event-Union bekommt ein neues Mitglied, alte spezialisierte Handler bleiben zuweisbar und brechen erst auf dem neuen Pfad. Eine exhaustive Verzweigung kann gar nicht helfen, weil der Handler-Typ das zusätzliche Mitglied bereits ausgeblendet hat.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Schreibe den Callback als Property mit einem Funktionstyp. Unter <code>strictFunctionTypes</code> wird die unsichere Zuweisung dann abgewiesen:</p>
+<pre><code>type Handler&lt;T&gt; = {
+  handle: (event: T) =&gt; void;
+};
+
+const textOnly: Handler&lt;TextChanged&gt; = {
+  handle: event =&gt; console.log(event.value.toLowerCase()),
+};
+
+// Fehler: Handler&lt;TextChanged&gt; ist nicht Handler&lt;EditorEvent&gt;
+// const unsafe: Handler&lt;EditorEvent&gt; = textOnly;
+
+const complete: Handler&lt;EditorEvent&gt; = {
+  handle: event =&gt; {
+    if (event.kind === "text") {
+      console.log(event.value.toLowerCase());
+      return;
+    }
+    console.log(`Command: ${event.command}`);
+  },
+};</code></pre>
+<p>Der Trade-off ist strengere Komposition: Einen spezialisierten Handler kannst du nicht mehr bequem in einen breiteren Kanal stecken. Wenn eine Komponente tatsächlich nur <code>TextChanged</code> emittiert, sollte ihr eigener Generic-Parameter das ausdrücken. Wenn mehrere Event-Arten getrennte Lebenszyklen haben, sind separate Callbacks wie <code>onTextChange</code> und <code>onShortcut</code> oft klarer.</p>
+<p>Explizite Varianzannotationen wie <code>in T</code> sind hier keine Reparatur. Das Handbook warnt davor, sie zur Änderung strukturellen Verhaltens zu verwenden; TypeScript leitet die korrekte Varianz der Funktions-Property bereits ab.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart TD
+  A[Editor emittiert EditorEvent] --&gt; B{Handler-Deklaration}
+  B -- Methode --&gt; C[Text-only kann durchrutschen]
+  C -- Shortcut --&gt; D[Laufzeitfehler]
+  B -- Funktions-Property --&gt; E[Typfehler bei Zuweisung]
+</div>
+<figcaption>Die Syntax der Handler-Schnittstelle entscheidet, ob der Fehler an der Zuweisungsgrenze oder erst beim fremden Event sichtbar wird.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li><code>strictFunctionTypes</code> ist Teil von <code>strict</code>, kann aber separat deaktiviert werden.</li>
+<li>Die Ausnahme betrifft Methodendeklarationen, nicht jede Funktion, die als Objektwert geschrieben wird.</li>
+<li>Ein Cast kann die Prüfung weiterhin umgehen und verschiebt das Risiko zurück zur Laufzeit.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Kopiere beide Varianten in <code>handlers.ts</code> und aktiviere die gezeigte Konfiguration. Erwartung: Die Zuweisung mit <code>MethodHandler</code> bleibt erlaubt, dieselbe Zuweisung mit <code>Handler</code> erzeugt einen Typfehler. Führe anschließend die Methodenversion als JavaScript aus; beim <code>shortcut</code>-Event scheitert der Zugriff auf <code>toLowerCase</code>. Die Übung dauert etwa zehn Minuten.</p>
+<p>Prüfstand: Der resultierende Laufzeitfehler wurde unter Node reproduziert; HTML-Struktur, Überschriftenfolge, Diagrammanzahl und Wortumfang wurden automatisiert geprüft. Ein TypeScript-Compile-Test war lokal mangels Compiler nicht verfügbar und wird nicht behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Discriminated Unions</strong> machen vollständige Eventbehandlung sichtbar. <strong>Event Maps</strong> koppeln Eventnamen an Payloads. <strong>Generic Component APIs</strong> können den tatsächlich emittierten Subtyp tragen. <strong>Variance Annotations</strong> helfen selten bei Diagnose und Performance, nicht als Ersatz für eine passende Struktur.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 09.11.2026: <a href="https://www.typescriptlang.org/tsconfig/strictFunctionTypes.html">TSConfig: strictFunctionTypes</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-2-6.html#strict-function-types">TypeScript 2.6: Strict Function Types</a>, <a href="https://www.typescriptlang.org/docs/handbook/2/generics.html#variance-annotations">TypeScript Handbook: Variance Annotations</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 09.11.2026 | Ein Callback ist als Property strenger als als Methode | TypeScript-Typsystem | Tief;</p>
+<p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. React-Komponenten-APIs;</p>
+<p>Unsicher geblieben: Ein TypeScript-Compile-Test war lokal mangels Compiler nicht verfügbar.</p>
+</footer>
+</main></body></html>
