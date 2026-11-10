@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein Ref sollte Fähigkeiten freigeben, nicht den DOM-Knoten</title>
+<meta name="description" content="Warum React-Komponenten mit useImperativeHandle eine schmale, stabile Ref-API statt ihres internen DOM-Knotens veröffentlichen sollten.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer,.note{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein Ref sollte Fähigkeiten freigeben, nicht den DOM-Knoten</h1>
+<p class="subtitle">Eine schmale imperative API schützt State-Invarianten und hält die interne Darstellung austauschbar.</p>
+<p class="meta">10.11.2026 · React-Komponenten-APIs · React 19.3 · Tief · ~8 min</p>
+<p>Eine Suchkomponente verwaltet ihren Text selbst. Nach dem Absenden will die übergeordnete Seite das Feld leeren und erneut fokussieren. Also reicht die Komponente ihren <code>&lt;input&gt;</code>-Knoten per Ref nach außen. Der Aufrufer setzt <code>ref.current.value = ""</code>. Im Browser wirkt das zunächst korrekt – bis ein späterer Render den alten React-State wieder in das kontrollierte Feld schreibt. Die sichtbare Leere war nie Teil des Zustandsmodells.</p>
+
+<h2>TL;DR</h2>
+<p>Ein öffentlicher Ref ist eine Komponenten-API. Wenn du den DOM-Knoten weiterreichst, veröffentlichst du mehr Operationen als beabsichtigt: Wert, Styles, Attribute und Struktur lassen sich außerhalb der State-Logik verändern. Behalte den Knoten intern und expose mit <code>useImperativeHandle</code> nur fachlich erlaubte Befehle wie <code>focus()</code> und <code>clear()</code>. Zustände, die sich als Props ausdrücken lassen, bleiben dagegen deklarativ.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst kontrollierte Eingaben, <code>useState</code> und <code>useRef</code>. Die Beispiele beziehen sich auf <a href="https://react.dev/versions">React 19.3</a>. Seit React 19 ist <code>ref</code> als Prop verfügbar; für React 18 und älter brauchst du <a href="https://react.dev/reference/react/forwardRef"><code>forwardRef</code></a>. Die API und ihre Abhängigkeitsregeln beschreibt die offizielle Referenz zu <a href="https://react.dev/reference/react/useImperativeHandle"><code>useImperativeHandle</code></a>.</p>
+<pre><code>// Ausschnitt: tsconfig.json
+{
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react-jsx",
+    "moduleResolution": "Bundler"
+  }
+}</code></pre>
+
+<h2>Der Aha-Effekt</h2>
+<p>Die Frage lautet nicht: „Welches Element steckt in der Komponente?“, sondern: „Was darf ein Aufrufer mit ihr tun?“ Ein Ref, der auf <code>HTMLInputElement</code> zeigt, koppelt Consumer an eine Implementierung. Ein Ref vom Typ <code>SearchFieldHandle</code> definiert dagegen ein Protokoll. Die Komponente darf später ein anderes Eingabeelement verwenden, Fokus intern umleiten oder beim Leeren zusätzlich Validierungszustand zurücksetzen.</p>
+<p>React setzt Refs in der Commit-Phase. Sie sind ein Escape Hatch für imperative Aktionen wie Fokus, Scrollen oder Selektion, nicht ein zweiter Datenkanal neben Props und State. Diese Trennung ist der eigentliche Architekturgewinn; <code>useImperativeHandle</code> ist nur das Werkzeug dafür.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die folgende React-19-Komponente veröffentlicht ihren DOM-Knoten. Der Elternteil kann dadurch den kontrollierten Wert am State vorbei verändern:</p>
+<pre><code>// Ausschnitt: SearchPage.tsx
+import { type Ref, useRef, useState } from "react";
+
+function SearchField({ ref }: { ref?: Ref&lt;HTMLInputElement&gt; }) {
+  const [value, setValue] = useState("Ada");
+
+  return (
+    &lt;input
+      ref={ref}
+      value={value}
+      onChange={event =&gt; setValue(event.currentTarget.value)}
+    /&gt;
+  );
+}
+
+export function SearchPage() {
+  const fieldRef = useRef&lt;HTMLInputElement&gt;(null);
+
+  function resetAfterSubmit() {
+    if (!fieldRef.current) return;
+    fieldRef.current.value = ""; // DOM leer, State weiterhin "Ada"
+    fieldRef.current.focus();
+  }
+
+  return &lt;SearchField ref={fieldRef} /&gt;;
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Die direkte Zuweisung ändert laut <a href="https://developer.mozilla.org/en-US/docs/Web/API/HTMLInputElement/value">MDN</a> den aktuellen Wert des DOM-Elements. Sie ruft aber weder den React-Handler auf noch aktualisiert sie <code>value</code> im Komponenten-State. Beim nächsten Render gleicht React das DOM wieder an seine Ausgabe an: „Ada“ erscheint erneut. Das Symptom wirkt zufällig, weil irgendein unabhängiges Update den Rücksprung auslösen kann.</p>
+<p>Zusätzlich ist der Consumer nun von <code>HTMLInputElement</code> abhängig. Ein Wechsel auf eine zusammengesetzte Autocomplete-Struktur wird zur Breaking Change. React warnt generell davor, von React verwaltete DOM-Knoten destruktiv zu verändern, weil dadurch inkonsistente Darstellung oder Fehler entstehen können.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Definiere eine minimale Handle-Schnittstelle. Die Komponente führt jede Mutation durch ihre eigene State-Grenze und kapselt den echten Knoten:</p>
+<pre><code>// Vollständiger Komponentenausschnitt für React 19
+import {
+  type Ref,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
+
+export type SearchFieldHandle = {
+  focus(): void;
+  clear(): void;
+};
+
+type SearchFieldProps = {
+  ref?: Ref&lt;SearchFieldHandle&gt;;
+};
+
+export function SearchField({ ref }: SearchFieldProps) {
+  const inputRef = useRef&lt;HTMLInputElement&gt;(null);
+  const [value, setValue] = useState("Ada");
+
+  useImperativeHandle(ref, () =&gt; ({
+    focus: () =&gt; inputRef.current?.focus(),
+    clear: () =&gt; setValue(""),
+  }), []);
+
+  return (
+    &lt;input
+      ref={inputRef}
+      value={value}
+      onChange={event =&gt; setValue(event.currentTarget.value)}
+    /&gt;
+  );
+}
+
+export function SearchPage() {
+  const fieldRef = useRef&lt;SearchFieldHandle&gt;(null);
+
+  function resetAfterSubmit() {
+    fieldRef.current?.clear();
+    fieldRef.current?.focus();
+  }
+
+  return &lt;SearchField ref={fieldRef} /&gt;;
+}</code></pre>
+<p>Der Trade-off ist eine zusätzliche API, die versioniert und getestet werden muss. Wenn der Elternteil den Suchtext ohnehin fachlich besitzt, ist die bessere Alternative eine kontrollierte Komponente mit <code>value</code> und <code>onChange</code>; dann wird „Leeren“ als Prop-Änderung modelliert und nur der Fokus bleibt imperativ. React empfiehlt ausdrücklich, per Prop ausdrückbare Zustände nicht hinter Ref-Methoden zu verstecken.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart LR
+  A[Elternkomponente] -- clear --&gt; B[SearchFieldHandle]
+  B -- setValue --&gt; C[Komponenten-State]
+  C -- Render --&gt; D[DOM]
+  A -. kein Direktzugriff .-&gt; D
+</div>
+<noscript>Textliche Alternative: Der Elternteil ruft clear am Handle auf; das Handle aktualisiert den Komponenten-State, und erst der Renderpfad schreibt das DOM.</noscript>
+<figcaption>Der Befehl durchläuft dieselbe State-Grenze wie Benutzereingaben. Der DOM-Knoten bleibt ein Implementierungsdetail.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Handle-Methoden dürfen nicht während des Renderns aufgerufen werden; Refs werden erst beim Commit gesetzt.</li>
+<li>Reaktive Werte, die ein Handle verwendet, gehören in die Dependency-Liste von <code>useImperativeHandle</code>.</li>
+<li>Ein Handle ist kein Ersatz für <code>disabled</code>, <code>value</code> oder andere deklarative Zustands-Props.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Setze in der Fehlervariante den DOM-Wert auf leer und löse danach mit einem zusätzlichen Counter-State einen Render aus. Beobachtung: „Ada“ kehrt zurück. Ersetze anschließend den Ref-Typ durch <code>SearchFieldHandle</code> und rufe <code>clear()</code> auf; der Wert bleibt leer, weil State und DOM übereinstimmen. Die Übung dauert etwa zehn Minuten. Ein vollständiger React-DOM-Integrationstest wurde lokal nicht ausgeführt; die Aussage folgt dem dokumentierten Modell kontrollierter DOM-Ausgabe.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Controlled versus uncontrolled Components</strong> entscheidet, wem der Wert gehört. <strong>Fokusmanagement</strong> verbindet imperative Handles mit Accessibility. <strong>Ref-Callbacks</strong> eignen sich für dynamische Knotenmengen. <strong>Komponenten-SemVer</strong> behandelt Handle-Methoden als öffentliche Oberfläche statt als Implementierungsdetail.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 10.11.2026: <a href="https://react.dev/versions">React Versions: 19.3</a>, <a href="https://react.dev/blog/2026/09/09/react-19-3">React 19.3 Release</a>, <a href="https://react.dev/reference/react/useImperativeHandle">React: useImperativeHandle</a>, <a href="https://react.dev/learn/manipulating-the-dom-with-refs">React: Manipulating the DOM with Refs</a>, <a href="https://react.dev/reference/react/forwardRef">React: forwardRef</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/HTMLInputElement/value">MDN: HTMLInputElement.value</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 10.11.2026 | Ein Ref sollte Fähigkeiten freigeben, nicht den DOM-Knoten | React-Komponenten-APIs | Tief;</p>
+<p>Bereich-Rotation: heute React-Komponenten-APIs → morgen z. B. Datenzugriff &amp; Tests;</p>
+<p>Unsicher geblieben: Ein vollständiger React-DOM-Integrations- und TypeScript-Compile-Test war lokal nicht verfügbar.</p>
+</footer>
+</main></body></html>
