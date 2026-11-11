@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ein Cache-Test braucht eine Uhr, keine Wartezeit</title>
+<meta name="description" content="Warum TTL-Caches eine injizierbare Uhr brauchen und wie deterministische Tests Ablaufgrenzen ohne echte Wartezeit prüfen.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Ein Cache-Test braucht eine Uhr, keine Wartezeit</h1>
+<p class="subtitle">TTL-Logik wird deterministisch, sobald verstrichene Zeit eine explizite Abhängigkeit ist.</p>
+<p class="meta">11.11.2026 · Datenzugriff, Caching &amp; Tests · TypeScript 6.0 + Performance API · Tief · ~8 min</p>
+<p>Ein kleiner In-Memory-Cache hält Suchergebnisse 50 Millisekunden frisch. Der Test schreibt einen Eintrag, wartet 51 Millisekunden und erwartet danach einen Miss. Lokal ist alles grün. Im CI wird der Test unregelmäßig rot; gelegentlich dauert die Suite nur unnötig lange. Die Ursache liegt nicht zwingend im Cache. Der Test hat gleichzeitig TTL-Regel, Timer-Auflösung und Scheduler getestet.</p>
+
+<h2>TL;DR</h2>
+<p>Ein TTL-Cache beantwortet eine fachliche Frage: Liegt <code>now</code> vor <code>expiresAt</code>? Wenn der Cache die Uhr selbst über <code>Date.now()</code> oder <code>performance.now()</code> beschafft, muss der Test reale Zeit verstreichen lassen oder globale Timer manipulieren. Injiziere stattdessen eine minimale <code>Clock</code>. Produktion erhält eine monotone Uhr, der Test eine manuell fortschaltbare. So prüfst du die Ablaufgrenze ohne Schlafen und ohne globale Testumgebung.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Generics, <code>Map</code> und den Unterschied zwischen Unit- und Integrationstest. Die Beispiele verwenden <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> und den eingebauten Node-Test-Runner. Für Browser-Caches ist die dokumentierte Semantik von <a href="https://developer.mozilla.org/en-US/docs/Web/API/Performance/now"><code>performance.now()</code></a> wichtig: Der Wert ist relativ zu <code>timeOrigin</code> und monoton, also nicht von nachträglichen Systemuhrkorrekturen betroffen.</p>
+<pre><code>// tsconfig.json – relevanter Ausschnitt
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true
+  }
+}</code></pre>
+
+<h2>Der Aha-Effekt</h2>
+<p>Zeit ist kein unsichtbarer Hintergrund, sondern Eingabe der Cache-Entscheidung. Ein Test, der wartet, kontrolliert diese Eingabe nur indirekt. Eine <code>Clock</code> macht sie so explizit wie den Schlüssel oder die TTL. Das erlaubt einen präzisen Test von <code>49 ms</code> gegen <code>50 ms</code>, ohne dass tatsächlich 50 Millisekunden vergehen.</p>
+<p>Die Abstraktion muss nicht aus einem Framework stammen. Ein Objekt mit <code>now(): number</code> reicht. Entscheidend ist, dass Erzeugen und Prüfen eines Eintrags dieselbe Uhr verwenden. Dadurch bleibt die Einheit der Zeit innerhalb des Caches konsistent.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die Fehlervariante koppelt Produktionslogik und Test an die reale Wanduhr. Der Test enthält bewusst keine künstliche Übertreibung; genau solche kurzen Wartezeiten entstehen bei vermeintlich schnellen TTL-Tests:</p>
+<pre><code>// Ausschnitt: real-time-cache.test.ts
+import assert from "node:assert/strict";
+import test from "node:test";
+
+const delay = (ms: number) =&gt;
+  new Promise&lt;void&gt;(resolve =&gt; setTimeout(resolve, ms));
+
+test("expires after 50 ms", async () =&gt; {
+  const cache = new RealTimeCache&lt;string, string&gt;(50);
+  cache.set("profile", "Ada");
+
+  await delay(51);
+
+  assert.equal(cache.get("profile"), undefined);
+});</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p><code>setTimeout(51)</code> garantiert nicht, dass der Callback exakt nach 51 Millisekunden läuft; er wird erst ausführbar, wenn Timer und Event Loop ihn einplanen. Der Test wartet daher auf Infrastruktur, obwohl er nur eine Vergleichsregel prüfen will. Viele solcher Tests summieren reale Pausen. Knapp gewählte Grenzen können zudem durch Timerpräzision und Umgebung beeinflusst werden.</p>
+<p><code>Date.now()</code> ist epoch-basiert und kann laut <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now">MDN</a> reduzierter Präzision unterliegen; außerdem kann die Systemuhr korrigiert werden. Für eine nur innerhalb derselben Seiten- oder Prozesslebenszeit gemessene TTL ist eine monotone Uhr das passendere Modell.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Der Cache erhält seine Uhr im Konstruktor. Die Produktionsvoreinstellung nutzt <code>performance.now()</code>; der Test kontrolliert eine <code>ManualClock</code>:</p>
+<pre><code>// cache-clock.test.ts – lauffähiger Ausschnitt
+import assert from "node:assert/strict";
+import test from "node:test";
+
+type Clock = { now(): number };
+
+class ManualClock implements Clock {
+  private time: number;
+  constructor(time = 0) { this.time = time; }
+  now() { return this.time; }
+  advance(ms: number) { this.time += ms; }
+}
+
+class TtlCache&lt;K, V&gt; {
+  private entries = new Map&lt;K, { value: V; expiresAt: number }&gt;();
+  private readonly ttlMs: number;
+  private readonly clock: Clock;
+
+  constructor(ttlMs: number, clock: Clock = { now: () =&gt; performance.now() }) {
+    this.ttlMs = ttlMs;
+    this.clock = clock;
+  }
+
+  set(key: K, value: V) {
+    this.entries.set(key, { value, expiresAt: this.clock.now() + this.ttlMs });
+  }
+
+  get(key: K): V | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    if (this.clock.now() &gt;= entry.expiresAt) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+}
+
+test("expires exactly at the TTL boundary", () =&gt; {
+  const clock = new ManualClock(1_000);
+  const cache = new TtlCache&lt;string, string&gt;(50, clock);
+  cache.set("profile", "Ada");
+
+  clock.advance(49);
+  assert.equal(cache.get("profile"), "Ada");
+  clock.advance(1);
+  assert.equal(cache.get("profile"), undefined);
+});</code></pre>
+<p>Der Trade-off ist ein zusätzlicher Konstruktorparameter. Für eine kleine reine Funktion wäre <code>isFresh(createdAt, ttl, now)</code> noch einfacher. Globale Fake-Timer sind eine Alternative, wenn der Code mehrere echte Timer koordiniert; für eine einzelne Vergleichsregel vergrößern sie jedoch den Test-Scope.</p>
+<p>Die monotone Standarduhr passt nur zu flüchtigen Einträgen innerhalb desselben Zeitursprungs. Persistierst du Ablaufzeitpunkte über Reloads, Tabs oder Prozesse hinweg, brauchst du epoch-basierte Zeit wie <code>Date.now()</code> – weiterhin injiziert, damit Tests sie kontrollieren können.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart LR
+  A[Set bei 1000] -- TTL 50 --&gt; B[expiresAt 1050]
+  B -- now 1049 --&gt; C[Cache Hit]
+  B -- now 1050 --&gt; D[Cache Miss]
+</div>
+<noscript>Textliche Alternative: Eintrag bei 1000 plus TTL 50 ergibt Ablaufzeit 1050; bei 1049 ist er frisch, bei 1050 abgelaufen.</noscript>
+<figcaption>Die manuelle Uhr springt direkt an beide Seiten der fachlichen Grenze. Kein Scheduler ist Teil des Tests.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Lege fest, ob exakt <code>expiresAt</code> bereits abgelaufen bedeutet; der Test dokumentiert hier <code>&gt;=</code>.</li>
+<li>Mische innerhalb eines Caches niemals <code>Date.now()</code>- und <code>performance.now()</code>-Werte.</li>
+<li>Prüfe Räumung und Speichergrenzen separat; TTL allein verhindert keinen unbegrenzten Cache.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Kopiere den lauffähigen Ausschnitt in <code>cache-clock.test.ts</code> und starte <code>node --test cache-clock.test.ts</code> mit einer aktuellen Node-Version, die Type Stripping unterstützt. Ändere anschließend <code>&gt;=</code> zu <code>&gt;</code>. Erwartung: Der Grenztest schlägt sofort fehl, ohne reale Wartezeit. Der hier gezeigte Test lief unter Node 24 erfolgreich; ein vollständiger <code>tsc</code>-Compile-Test war lokal nicht verfügbar.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Cache Keys</strong> definieren Identität, während TTL Gültigkeit definiert. <strong>Stale-while-revalidate</strong> trennt Nutzbarkeit von Frische. <strong>Fake Timer</strong> sind sinnvoll für koordinierte Timer-APIs. <strong>Property-based Tests</strong> können viele Zeitpunkte rund um Ablaufgrenzen erzeugen.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 11.11.2026: <a href="https://developer.mozilla.org/en-US/docs/Web/API/Performance/now">MDN: Performance.now()</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/Performance_API/High_precision_timing">MDN: High precision timing</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now">MDN: Date.now()</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 11.11.2026 | Ein Cache-Test braucht eine Uhr, keine Wartezeit | Datenzugriff, Caching &amp; Tests | Tief;</p>
+<p>Bereich-Rotation: heute Datenzugriff, Caching &amp; Tests → morgen z. B. TypeScript-Typsystem;</p>
+<p>Unsicher geblieben: Ein vollständiger TypeScript-Compile-Test mit tsc war lokal nicht verfügbar.</p>
+</footer>
+</main></body></html>
