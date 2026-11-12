@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fehlen ist nicht dasselbe wie undefined</title>
+<meta name="description" content="Warum exactOptionalPropertyTypes Patch-Objekte vor unbeabsichtigtem Überschreiben mit undefined schützt.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Fehlen ist nicht dasselbe wie <code>undefined</code></h1>
+<p class="subtitle">Exakte optionale Properties machen aus einer stillen JavaScript-Eigenheit eine überprüfbare API-Entscheidung.</p>
+<p class="meta">12.11.2026 · TypeScript-Typsystem · TypeScript 6.0 · Tief · ~8 min</p>
+<p>Ein Profilformular sendet nur geänderte Felder. Der Nutzer ändert den Anzeigenamen, lässt die Biografie unberührt und klickt auf Speichern. Trotzdem ist <code>bio</code> nach einem lokalen Objekt-Merge plötzlich <code>undefined</code>. Der Patch enthielt den Schlüssel, obwohl er fachlich „keine Änderung“ bedeuten sollte. TypeScript hatte das Objekt akzeptiert – weil optionale Properties standardmäßig zwei verschiedene Laufzeitzustände zusammenfallen lassen.</p>
+
+<h2>TL;DR</h2>
+<p>Bei einem Patch bedeutet ein fehlender Schlüssel meist „beibehalten“. Ein vorhandener Schlüssel bedeutet „ändern“ – selbst wenn sein Wert <code>undefined</code> ist. Aktiviere <code>strictNullChecks</code> und <code>exactOptionalPropertyTypes</code>, damit <code>bio?: string | null</code> nur Abwesenheit, Text oder bewusstes Leeren durch <code>null</code> erlaubt. Wenn <code>undefined</code> tatsächlich ein gültiger Wert sein soll, schreibe ihn explizit in den Typ. Die Compileroption ersetzt keine Runtime-Validierung externer JSON-Daten.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst <code>Partial</code>, Objekt-Spread und <code>strictNullChecks</code>. Die Beispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>. <a href="https://www.typescriptlang.org/tsconfig/exactOptionalPropertyTypes.html"><code>exactOptionalPropertyTypes</code></a> existiert seit TypeScript 4.4, gehört nicht automatisch zur <code>strict</code>-Familie und verlangt <code>strictNullChecks</code>.</p>
+<pre><code>// tsconfig.json – relevanter Ausschnitt
+{
+  "compilerOptions": {
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noEmit": true,
+    "target": "ES2022"
+  }
+}</code></pre>
+
+<h2>Der Aha-Effekt</h2>
+<p>Beim Lesen liefern <code>patch.bio</code> und ein fehlendes <code>bio</code> beide <code>undefined</code>. Das macht sie aber nicht identisch. <code>Object.hasOwn(patch, "bio")</code> erkennt einen vorhandenen Schlüssel auch dann, wenn dessen Wert <code>undefined</code> ist. Objekt-Spread kopiert vorhandene aufzählbare Properties. Damit kann <code>{ ...profile, ...patch }</code> einen gültigen Wert überschreiben.</p>
+<p>Das Fragezeichen sollte deshalb nicht als Kurzform für <code>| undefined</code> gelesen werden. Es beschreibt zunächst die Anwesenheit des Schlüssels. Die Compileroption sorgt dafür, dass der Werttyp exakt das bleibt, was rechts vom Doppelpunkt steht.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Diese Variante wirkt plausibel: Das Formular normalisiert ein leeres Eingabefeld mit <code>|| undefined</code> und baut daraus einen Patch. Ohne exakte optionale Properties akzeptiert der Compiler das Objekt.</p>
+<pre><code>// profile-patch.ts – Fehlervariante
+type Profile = {
+  displayName: string;
+  bio: string | null;
+};
+
+type ProfilePatch = Partial&lt;Profile&gt;;
+
+function applyPatch(current: Profile, patch: ProfilePatch): Profile {
+  return { ...current, ...patch };
+}
+
+const patch: ProfilePatch = {
+  displayName: "Ada L.",
+  bio: undefined, // ohne Flag erlaubt
+};
+
+applyPatch({ displayName: "Ada", bio: "Compilerbau" }, patch);
+// Laufzeit: { displayName: "Ada L.", bio: undefined }</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Die Typaussage <code>bio: string | null</code> verspricht, dass ein fertiges Profil nie <code>undefined</code> enthält. Der Merge verletzt diese Invariante, weil die schwächere Patch-Typisierung einen dritten Wert hereingelassen hat. Symptome tauchen später auf: Rendering-Code behandelt <code>null</code>, erhält aber <code>undefined</code>; ein lokaler Merge unterscheidet sich vom Server; oder <code>Object.keys</code> meldet ein Feld, das fachlich gar nicht geändert wurde.</p>
+<p>Über HTTP wird es noch tückischer: <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify"><code>JSON.stringify</code></a> lässt object properties mit <code>undefined</code> aus. Derselbe Patch überschreibt lokal die Biografie, überträgt den Schlüssel aber nicht zum Server. Das ist keine TypeScript-Eigenheit, sondern JavaScript- und JSON-Verhalten.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Definiere zuerst das Protokoll: Abwesenheit heißt „unverändert“, <code>null</code> heißt „löschen“, ein String heißt „setzen“. Dann kann <code>Partial&lt;Profile&gt;</code> mit exakten optionalen Properties dieses Protokoll ausdrücken. Erzeuge fehlende Felder wirklich durch Weglassen:</p>
+<pre><code>// profile-patch.test.ts – lauffähiger Ausschnitt
+import assert from "node:assert/strict";
+import test from "node:test";
+
+type Profile = { displayName: string; bio: string | null };
+type ProfilePatch = Partial&lt;Profile&gt;;
+
+function buildPatch(name: string, bioChanged: boolean, bio: string): ProfilePatch {
+  return {
+    displayName: name.trim(),
+    ...(bioChanged ? { bio: bio.trim() || null } : {}),
+  };
+}
+
+function applyPatch(current: Profile, patch: ProfilePatch): Profile {
+  return { ...current, ...patch };
+}
+
+test("an untouched bio is absent and survives the merge", () =&gt; {
+  const current: Profile = { displayName: "Ada", bio: "Compilerbau" };
+  const patch = buildPatch("Ada L.", false, "");
+  const next = applyPatch(current, patch);
+
+  assert.equal(Object.hasOwn(patch, "bio"), false);
+  assert.deepEqual(next, { displayName: "Ada L.", bio: "Compilerbau" });
+});</code></pre>
+<p>Der Trade-off ist Migrationsarbeit: Bibliothekstypen oder bisherige Zuweisungen können Fehler melden. Aktiviere das Flag bewusst und repariere Stellen fachlich, statt überall <code>| undefined</code> anzuhängen. Eine Alternative ist eine discriminated union wie <code>{ kind: "keep" } | { kind: "set"; value: string } | { kind: "clear" }</code>. Sie ist ausführlicher, aber bei komplexen Befehlen noch eindeutiger als Anwesenheitssemantik.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart LR
+  A[Formularzustand] -- unverändert --&gt; B[Key fehlt]
+  A -- Text --&gt; C[String setzen]
+  A -- leeren --&gt; D[null senden]
+  B -- Spread --&gt; E[Alter Wert bleibt]
+  C -- Spread --&gt; E
+  D -- Spread --&gt; E
+</div>
+<noscript>Textliche Alternative: Ein unverändertes Feld wird weggelassen, Text wird als String gesetzt und bewusstes Leeren als null übertragen; der Merge erhält oder ändert den Wert entsprechend.</noscript>
+<figcaption>Das Patch-Protokoll besitzt drei fachliche Wege. <code>undefined</code> wird dafür nicht benötigt.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li><code>exactOptionalPropertyTypes</code> prüft nur Compile-Time-Zuweisungen; API-Antworten beginnen weiterhin als <code>unknown</code>.</li>
+<li><code>in</code> berücksichtigt auch geerbte Properties; für reine Nutzdaten ist <code>Object.hasOwn</code> präziser.</li>
+<li>Ein <code>undefined</code> in Arrays wird bei JSON-Serialisierung zu <code>null</code>, nicht ausgelassen.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Speichere den lauffähigen Ausschnitt als <code>profile-patch.test.ts</code> und starte <code>node --test profile-patch.test.ts</code> mit einer aktuellen Node-Version, die Type Stripping unterstützt. Ergänze danach <code>const invalid: ProfilePatch = { bio: undefined };</code> und prüfe das Projekt mit <code>tsc</code>: Mit dem Flag soll die Zuweisung fehlschlagen. Der Laufzeittest wurde hier unter Node 24 ausgeführt; ein lokaler TypeScript-Compiler war nicht verfügbar.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong>Runtime-Validierung</strong> schützt dieselbe Grenze gegen fremde Daten. <strong>Discriminated Unions</strong> machen komplexere Patch-Befehle explizit. <strong>Form-State-Modellierung</strong> trennt „berührt“ von „leer“. <strong>JSON Merge Patch</strong> definiert eine standardisierte, aber eigene <code>null</code>-Semantik.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 12.11.2026: <a href="https://www.typescriptlang.org/tsconfig/exactOptionalPropertyTypes.html">TypeScript: exactOptionalPropertyTypes</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-4-4.html#exact-optional-property-types---exactoptionalpropertytypes">TypeScript 4.4 Release Notes</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/hasOwn">MDN: Object.hasOwn()</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax">MDN: Spread-Syntax</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify">MDN: JSON.stringify()</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 12.11.2026 | Fehlen ist nicht dasselbe wie undefined | TypeScript-Typsystem | Tief;</p>
+<p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. React;</p>
+<p>Unsicher geblieben: Ein vollständiger TypeScript-Compile-Test mit tsc war lokal nicht verfügbar.</p>
+</footer>
+</main></body></html>
