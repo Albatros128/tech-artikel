@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nach await braucht dein State-Update eine neue Transition-Grenze</title>
+<meta name="description" content="Warum React State-Updates nach await nicht automatisch Teil einer Transition sind und wie du die Priorität korrekt modellierst.">
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--text:#242424;--muted:#686b70;--line:#dededb;--code:#f1f3f6;--accent:#315f72}
+@media(prefers-color-scheme:dark){:root{--bg:#151716;--text:#e7e8e6;--muted:#a8aaa7;--line:#383b39;--code:#20272b;--accent:#9bcadf}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:19px/1.75 Georgia,"Times New Roman",serif}main{width:min(740px,calc(100% - 36px));margin:auto;padding:72px 0 54px}h1,h2,.meta,footer{font-family:system-ui,sans-serif}h1{font-size:clamp(2.4rem,7vw,4rem);line-height:1.08;letter-spacing:-.045em;margin:0 0 22px}h2{font-size:1.65rem;line-height:1.3;margin:48px 0 16px}.subtitle{font-size:1.35rem;line-height:1.5;color:var(--muted)}.meta{font-size:.84rem;color:var(--muted);margin:20px 0 42px}p{margin:0 0 23px}a{color:var(--accent);text-underline-offset:3px}code{font:.85em ui-monospace,SFMono-Regular,Consolas,monospace}pre{overflow:auto;padding:22px;background:var(--code);border:1px solid var(--line);border-radius:10px;line-height:1.55}pre code{font-size:14px}figure{margin:28px 0;padding:20px;border:1px solid var(--line);border-radius:10px;overflow:auto}figcaption,footer{font-size:14px;line-height:1.6;color:var(--muted)}.mermaid{font-family:system-ui,sans-serif}li{margin:10px 0}hr{border:0;border-top:1px solid var(--line);margin:50px 0 25px}footer p{margin:8px 0}@media(max-width:600px){main{padding-top:40px}body{font-size:18px}pre{padding:15px}}
+</style>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default',securityLevel:'strict'});
+</script>
+</head>
+<body><main><article>
+<h1>Nach <code>await</code> braucht dein State-Update eine neue Transition-Grenze</h1>
+<p class="subtitle">Eine asynchrone Action bleibt pending, doch ihre Fortsetzung erbt nicht automatisch die Render-Priorität.</p>
+<p class="meta">13.11.2026 · React-Concurrent-Rendering · React 19.3 + TypeScript 6.0 · Tief · ~8 min</p>
+<p>Ein Profil-Editor speichert Daten über die API. Während des Requests zeigt der Button „Speichert …“. Nach der Antwort ersetzt die Komponente das Profil durch die Serverfassung. Das Ganze steht bereits in <code>startTransition(async () =&gt; ...)</code>. Trotzdem behandelt React das abschließende <code>setProfile</code> als dringendes Update. Der Code sieht nach einer einzigen Transition aus, überschreitet aber eine unsichtbare JavaScript-Grenze: <code>await</code>.</p>
+
+<h2>TL;DR</h2>
+<p>React ruft eine Transition-Action sofort auf und markiert State-Updates, die während dieses synchronen Aufrufs geplant werden. Nach einem <code>await</code> läuft die Fortsetzung später weiter; React kann den Transition-Kontext derzeit nicht automatisch über diese Async-Grenze tragen. Umschließe State-Updates nach dem Warten deshalb mit einem weiteren <code>startTransition</code>. Das äußere <code>useTransition</code> liefert weiterhin den Pending-Zustand der Action. Diese Verschachtelung löst jedoch keine Race Conditions und ordnet parallele Requests nicht.</p>
+
+<h2>Prerequisites</h2>
+<p>Du kennst Hooks, Promise-Fortsetzungen und den Unterschied zwischen dringenden und nicht dringenden Updates. Die Beispiele beziehen sich auf die am 13.11.2026 aktuelle Dokumentation für <a href="https://react.dev/versions">React 19.3</a> und auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+<pre><code>// tsconfig.json – relevanter Ausschnitt
+{
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react-jsx",
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true
+  }
+}</code></pre>
+
+<h2>Der Aha-Effekt</h2>
+<p><code>startTransition</code> färbt nicht die gesamte lexikalische Funktion dauerhaft ein. Entscheidend ist der Zeitpunkt, an dem ein Setter aufgerufen wird. Vor dem ersten <code>await</code> geschieht das innerhalb des synchron ausgeführten Action-Aufrufs. Die Promise-Fortsetzung wird dagegen in einem späteren Job ausgeführt. Laut <a href="https://react.dev/reference/react/useTransition#react-doesnt-treat-my-state-update-after-await-as-a-transition">React-Dokumentation</a> geht der Async-Kontext dabei derzeit verloren.</p>
+<p>Darum können zwei Aussagen gleichzeitig stimmen: <code>isPending</code> beschreibt noch die laufende asynchrone Action, aber ein nachgelagertes <code>setState</code> besitzt ohne neue Markierung nicht die Transition-Priorität.</p>
+
+<h2>So macht man es falsch</h2>
+<p>Die realistische Fehlervariante wartet korrekt auf den Server und hält den Button pending. Sie verlässt sich aber darauf, dass die äußere Transition auch das Update nach der Antwort markiert:</p>
+<pre><code>// ProfileEditor.tsx – Fehlervariante
+import { useState, useTransition } from "react";
+
+type Profile = { id: string; displayName: string };
+
+declare function saveProfile(profile: Profile): Promise&lt;Profile&gt;;
+
+export function ProfileEditor({ initial }: { initial: Profile }) {
+  const [profile, setProfile] = useState(initial);
+  const [isPending, startTransition] = useTransition();
+
+  function save(next: Profile) {
+    startTransition(async () =&gt; {
+      const saved = await saveProfile(next);
+      setProfile(saved); // nicht als Transition markiert
+    });
+  }
+
+  return (
+    &lt;button disabled={isPending} onClick={() =&gt; save(profile)}&gt;
+      {isPending ? "Speichert …" : "Speichern"}
+    &lt;/button&gt;
+  );
+}</code></pre>
+
+<h2>Warum ist das falsch?</h2>
+<p>Transitions sind ein Scheduling-Signal für Rendering, kein allgemeiner Promise-Kontext. React kann ein nicht dringendes Rendering unterbrechen, wenn etwa eine Texteingabe verarbeitet werden muss. Das nach <code>await</code> ausgeführte Update erhält dieses Signal in der Fehlervariante nicht. Bei einem teuren Ergebnis-Teilbaum kann sich die Oberfläche deshalb anders verhalten als beabsichtigt.</p>
+<p>Ein häufiger Reparaturversuch ist <code>await startTransition(...)</code>. Das funktioniert nicht: Der eigenständige <a href="https://react.dev/reference/react/startTransition"><code>startTransition</code>-Aufruf</a> gibt nichts zurück. <code>useTransition</code> stellt den Pending-Zustand bereit; das Warten gehört innerhalb der Action.</p>
+
+<h2>So macht man es richtig mit Trade-offs</h2>
+<p>Markiere das Update dort, wo es tatsächlich geplant wird. Die äußere Action umfasst den Request und liefert <code>isPending</code>; die innere Transition klassifiziert die State-Änderung nach der Antwort:</p>
+<pre><code>// ProfileEditor.tsx – verbesserter Ausschnitt
+import { useState, useTransition } from "react";
+
+type Profile = { id: string; displayName: string };
+type Props = {
+  initial: Profile;
+  saveProfile(profile: Profile): Promise&lt;Profile&gt;;
+};
+
+export function ProfileEditor({ initial, saveProfile }: Props) {
+  const [profile, setProfile] = useState(initial);
+  const [isPending, startTransition] = useTransition();
+
+  function save(next: Profile) {
+    startTransition(async () =&gt; {
+      const saved = await saveProfile(next);
+
+      startTransition(() =&gt; {
+        setProfile(saved);
+      });
+    });
+  }
+
+  return (
+    &lt;button disabled={isPending} onClick={() =&gt; save(profile)}&gt;
+      {isPending ? "Speichert …" : "Speichern"}
+    &lt;/button&gt;
+  );
+}</code></pre>
+<p>Der Preis ist sichtbare Verschachtelung. Für einfache Navigationen ohne <code>await</code> reicht eine Transition. Für geordnete Mutationen sind <a href="https://react.dev/reference/react/useActionState"><code>useActionState</code></a> oder Form-Actions oft die passendere Abstraktion. Sie modellieren Action-Zustand und Reihenfolge, können dadurch aber Operationen serialisieren. Direkte Transitions erlauben mehr Parallelität; dann musst du veraltete Antworten selbst verwerfen, Requests koordinieren oder eine fachliche Versionsregel verwenden.</p>
+
+<h2>Diagramm</h2>
+<figure>
+<div class="mermaid">
+flowchart LR
+  A[Klick] -- startet --&gt; B[Äußere Action]
+  B -- await Request --&gt; C[Async-Grenze]
+  C -- Antwort --&gt; D[Innere Transition]
+  D -- setProfile --&gt; E[Nicht dringendes Rendern]
+</div>
+<noscript>Textliche Alternative: Der Klick startet die äußere Action. Nach dem Request überschreitet der Code eine Async-Grenze; eine innere Transition markiert setProfile anschließend wieder als nicht dringendes Rendern.</noscript>
+<figcaption>Die zweite Transition sitzt hinter der Async-Grenze – direkt um das Update, dessen Priorität sie festlegt.</figcaption>
+</figure>
+
+<h2>Fallstricke am Rand</h2>
+<ul>
+<li>Transitions dürfen keine Texteingabe kontrollieren; deren State muss dringend bleiben.</li>
+<li>Eine Transition bricht den Netzwerkrequest nicht ab und rollt Serveränderungen nicht zurück.</li>
+<li>Mehrere asynchrone Actions können außer Reihenfolge fertig werden; die Verschachtelung behebt das nicht.</li>
+</ul>
+
+<h2>Selbst ausprobieren</h2>
+<p>Baue in 10 Minuten einen Editor mit einer künstlich verzögerten <code>saveProfile</code>-Funktion und einem Ergebnisbereich, der beim Rendern bewusst CPU-Arbeit simuliert. Vergleiche die Fehlervariante mit der inneren Transition und beobachte beide im React DevTools Profiler. Erwartung: <code>isPending</code> umfasst den Request in beiden Varianten; nur die zweite markiert das Update nach <code>await</code> als Transition. Ein React-DOM-Integrations- und TSX-Compile-Test war in der lokalen Umgebung nicht verfügbar, daher wird hier kein bestandener Test behauptet.</p>
+
+<h2>Verwandte Themen</h2>
+<p><strong><code>useActionState</code></strong> verwaltet geordnete Actions. <strong><code>useOptimistic</code></strong> trennt sofortiges Feedback vom bestätigten Ergebnis. <strong>Request-Identität</strong> verhindert, dass ältere Antworten neueren State überschreiben. <strong>Suspense</strong> entscheidet, welche bereits sichtbaren Inhalte während einer Transition erhalten bleiben.</p>
+
+<h2>Quellen</h2>
+<p>Geprüft am 13.11.2026: <a href="https://react.dev/versions">React Versions: 19.3</a>, <a href="https://react.dev/reference/react/useTransition">React: useTransition</a>, <a href="https://react.dev/reference/react/startTransition">React: startTransition</a>, <a href="https://react.dev/reference/react/useActionState">React: useActionState</a>, <a href="https://react.dev/blog/2026/09/09/react-19-3">React 19.3 Release</a>, <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> und die <a href="https://mermaid.js.org/config/usage">Mermaid-12-CDN-Anleitung</a>.</p>
+</article>
+<hr>
+<footer>
+<p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 13.11.2026 | Nach await braucht dein State-Update eine neue Transition-Grenze | React-Concurrent-Rendering | Tief;</p>
+<p>Bereich-Rotation: heute React-Concurrent-Rendering → morgen z. B. Datenzugriff &amp; Frontend-Architektur;</p>
+<p>Unsicher geblieben: Ein React-DOM-Integrations- und TypeScript-Compile-Test war lokal nicht verfügbar.</p>
+</footer>
+</main></body></html>
