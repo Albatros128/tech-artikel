@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Retry braucht eine Wiederholbarkeitsgarantie</title>
+  <meta name="description" content="Warum ein automatischer Retry für Mutationen nur mit einer Ende-zu-Ende-Idempotenzgarantie sicher ist – und wie TypeScript die Regel sichtbar macht.">
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#e4e4df;--accent:#3157c8;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#111316;--paper:#191c20;--text:#ecebe8;--muted:#adb2ba;--line:#343940;--accent:#9bb0ff;--code:#23272d;--note:#20283c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <article>
+    <header>
+      <h1>Ein Retry braucht eine Wiederholbarkeitsgarantie</h1>
+      <p class="subtitle">Bei einer Mutation ist „noch einmal senden“ erst dann sicher, wenn Client und Server denselben Befehl wiedererkennen.</p>
+      <p class="meta">Datenzugriff &amp; API-Design · TypeScript 6.0 / HTTP Semantics (RFC 9110) · Tief · ~8 min</p>
+    </header>
+
+    <p class="lead">Die Bestellung wurde angelegt, doch im Browser erscheint „Netzwerkfehler“. Ein automatischer Retry wirkt wie robuste Fehlerbehandlung. Tatsächlich kann er dieselbe Bestellung ein zweites Mal erzeugen: Der Server hatte den ersten Request bereits verarbeitet, nur seine Antwort erreichte den Client nicht.</p>
+
+    <h2>TL;DR</h2>
+    <p>Ein Transportfehler sagt nicht, ob eine Mutation ausgeführt wurde. Wiederhole einen nicht-idempotenten Request deshalb nur, wenn das Anwendungsprotokoll eine stabile Befehls-ID vorsieht und der Server für dieselbe ID dasselbe Ergebnis zurückgibt. Backoff begrenzt Last; er verhindert keine Duplikate.</p>
+
+    <h2>Prerequisites</h2>
+    <p>Du solltest <a href="https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2">idempotente HTTP-Methoden nach RFC 9110</a>, die <a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">Fetch API</a> und TypeScripts <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions">discriminated unions</a> kennen. Der Versionsbezug ist <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>; das Muster benötigt jedoch keine neue 6.0-Syntax.</p>
+
+    <h2>Der Aha-Effekt</h2>
+    <p>Retry-Sicherheit ist keine Eigenschaft deiner Schleife, sondern des gesamten Protokolls. RFC 9110 erlaubt die automatische Wiederholung idempotenter Methoden nach Kommunikationsfehlern. Eine nicht-idempotente Methode sollte ein Client dagegen nur wiederholen, wenn er ihre Semantik als idempotent kennt oder sicher weiß, dass der erste Versuch nicht angewendet wurde.</p>
+    <div class="callout"><strong>Eigene Schlussfolgerung:</strong> Der Retry-Mechanismus gehört damit fachlich näher an den Mutationsvertrag als an einen generischen Fetch-Wrapper.</div>
+
+    <h2>So macht man es falsch</h2>
+    <p>Die folgende Variante behandelt jeden Netzwerkfehler gleich. Sie erzeugt für jeden Versuch einen neuen fachlichen Befehl, obwohl der erste bereits erfolgreich gewesen sein kann.</p>
+    <pre><code>// Ausschnitt: realistische Fehlervariante
+type OrderInput = { sku: string; quantity: number };
+
+export async function createOrder(input: OrderInput): Promise&lt;Order&gt; {
+  for (let attempt = 0; attempt &lt; 2; attempt++) {
+    try {
+      const response = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json() as Order;
+    } catch (error) {
+      if (attempt === 1) throw error;
+    }
+  }
+  throw new Error("unerreichbar");
+}</code></pre>
+
+    <h2>Warum ist das falsch?</h2>
+    <p><code>fetch()</code> verwirft sein Promise bei Netzwerkfehlern, aber nicht allein wegen eines HTTP-Fehlerstatus; <code>response.ok</code> muss separat geprüft werden. Ein verworfenes Promise beweist trotzdem nicht, dass der Server nichts gespeichert hat. Auch ein clientseitiges Abbrechen macht eine bereits begonnene Servertransaktion nicht rückgängig.</p>
+    <p>Beobachtbar sind doppelte Bestellungen, Zahlungen oder Jobs – besonders dann, wenn Timeouts unter Last wahrscheinlicher werden. Das ist keine behauptete Performancewirkung, sondern eine Korrektheitsfolge des unklaren Commit-Zeitpunkts.</p>
+
+    <h2>So macht man es richtig</h2>
+    <p>Der Client erzeugt einmal eine Befehls-ID und verwendet sie bei allen Versuchen. Der Server speichert ID und Ergebnis atomar mit der Mutation. <code>Idempotency-Key</code> ist hier ein ausdrücklich vereinbarter Anwendungs-Header, keine automatische Garantie des Browsers.</p>
+    <pre><code>// Vollständiger Client-Ausschnitt
+export type OrderInput = { sku: string; quantity: number };
+export type Order = { id: string; sku: string; quantity: number };
+
+type Outcome =
+  | { kind: "created"; order: Order }
+  | { kind: "replayed"; order: Order };
+
+export async function submitOrder(
+  input: OrderInput,
+  commandId = crypto.randomUUID(),
+  request: typeof fetch = fetch
+): Promise&lt;Outcome&gt; {
+  const send = () =&gt; request("/api/orders", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": commandId
+    },
+    body: JSON.stringify(input)
+  });
+
+  for (let attempt = 0; attempt &lt; 2; attempt++) {
+    try {
+      const response = await send();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json() as Outcome;
+    } catch (error) {
+      if (attempt === 1) throw error;
+    }
+  }
+  throw new Error("unerreichbar");
+}</code></pre>
+    <pre><code>// Server-Pseudocode: Transaktion erforderlich
+begin transaction
+  if resultByCommandId[commandId] exists:
+    return { kind: "replayed", order: storedResult }
+  order = insertOrder(input)
+  insertCommandResult(commandId, order) // UNIQUE(commandId)
+commit
+return { kind: "created", order }</code></pre>
+    <p>Der Trade-off: Du brauchst Speicher, eine Aufbewahrungsfrist und eine Regel für „gleiche ID, anderer Payload“. Letzteres sollte ein Konflikt sein. Alternativ kann der Client nach einem unklaren Timeout den Status über die Befehls-ID abfragen. Für fachlich natürlich idempotente Operationen kann auch ein passendes <code>PUT</code>-Modell genügen.</p>
+
+    <h2>Diagramm</h2>
+    <figure>
+      <pre class="mermaid">flowchart LR
+  A[Client sendet K] --&gt; B[Server speichert]
+  B --&gt; C[Antwort geht verloren]
+  C --&gt; D[Client wiederholt K]
+  D --&gt; E[Server liefert vorhandenes Ergebnis]</pre>
+      <figcaption class="fallback">Textliche Erklärung: Der erste Versuch mit Schlüssel K wird gespeichert, seine Antwort geht verloren. Beim zweiten Versuch erkennt der Server K und gibt das bereits gespeicherte Ergebnis zurück, statt die Mutation erneut auszuführen.</figcaption>
+    </figure>
+
+    <h2>Fallstricke am Rand</h2>
+    <ul>
+      <li>Erzeuge die Befehls-ID nicht innerhalb jedes Retry-Versuchs.</li>
+      <li>Speichere Schlüssel und Mutation atomar; zwei getrennte Writes öffnen erneut ein Race.</li>
+      <li>Wiederhole nicht pauschal jeden <code>4xx</code>- oder <code>5xx</code>-Status. <a href="https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3"><code>Retry-After</code></a> kann Wartezeit signalisieren, nicht die fachliche Sicherheit.</li>
+    </ul>
+
+    <h2>Selbst ausprobieren</h2>
+    <p>Baue in 10 Minuten einen Fake-Server mit einer <code>Map&lt;string, Order&gt;</code>. Lass Versuch eins die Bestellung speichern und danach einen simulierten Verbindungsabbruch werfen. Wiederhole mit derselben ID. Erwartung: Die Map enthält genau einen Eintrag und beide erfolgreichen Antworten referenzieren dieselbe Order-ID. Ändere danach die ID beim Retry; nun wird das Duplikat sichtbar.</p>
+
+    <h2>Verwandte Themen</h2>
+    <ul>
+      <li><strong>Optimistische UI:</strong> Eine stabile Befehls-ID verbindet lokale Projektion und Serverergebnis.</li>
+      <li><strong>Outbox Pattern:</strong> Es verschiebt dieselbe Zustellungsfrage an die Grenze zwischen Datenbank und Message Broker.</li>
+      <li><strong>ETags und <code>If-Match</code>:</strong> Sie verhindern verlorene Updates, lösen aber nicht automatisch doppelte Erzeugungen.</li>
+      <li><strong>Exponential Backoff mit Jitter:</strong> Er steuert Wiederholungszeitpunkte, ersetzt aber keine Idempotenz.</li>
+    </ul>
+
+    <h2>Quellen</h2>
+    <ul>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2">RFC 9110, Abschnitt 9.2.2: Idempotent Methods</a></li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3">RFC 9110, Abschnitt 10.2.3: Retry-After</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch">MDN: Window.fetch()</a></li>
+      <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+      <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+    </ul>
+
+    <hr>
+    <div class="footer-lines">
+      <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 14.11.2026 | Ein Retry braucht eine Wiederholbarkeitsgarantie | Datenzugriff &amp; API-Design | Tief;</p>
+      <p>Bereich-Rotation: heute Datenzugriff &amp; API-Design → morgen z. B. React;</p>
+      <p>Unsicher geblieben: nichts.</p>
+    </div>
+  </article>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
