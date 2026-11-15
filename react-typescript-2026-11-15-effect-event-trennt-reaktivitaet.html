@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Effect Event trennt Aktualität von Reaktivität</title>
+  <meta name="description" content="Wie useEffectEvent aktuelle Props liest, ohne eine externe Synchronisierung unnötig neu zu starten – und wo die Grenze des Musters liegt.">
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#e4e4df;--accent:#3157c8;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#111316;--paper:#191c20;--text:#ecebe8;--muted:#adb2ba;--line:#343940;--accent:#9bb0ff;--code:#23272d;--note:#20283c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <article>
+    <header>
+      <h1>Ein Effect Event trennt Aktualität von Reaktivität</h1>
+      <p class="subtitle">Nicht jeder Wert, den ein Callback lesen muss, soll auch die zugrunde liegende Synchronisierung neu starten.</p>
+      <p class="meta">React-Effects · React 19.3, useEffectEvent seit 19.2 · Tief · ~8 min</p>
+    </header>
+
+    <p class="lead">Ein Chat verbindet sich mit Raum „support“. Während die Verbindung steht, wechselt der Nutzer vom hellen zum dunklen Theme. Plötzlich trennt und öffnet die Komponente den Socket neu – nur weil die „Verbunden“-Meldung in der neuen Farbe erscheinen soll.</p>
+
+    <h2>TL;DR</h2>
+    <p>Ein Effect synchronisiert mit einem externen System; seine Dependencies bestimmen, wann diese Synchronisierung erneuert wird. Ein Effect Event liest dagegen die zuletzt committeten Props und States, ohne selbst die Re-Synchronisierung auszulösen. Verwende <code>useEffectEvent</code> nur für Logik, die tatsächlich durch ein Ereignis aus dem Effect ausgelöst wird – nie, um echte Dependencies zu verstecken.</p>
+
+    <h2>Prerequisites</h2>
+    <p>Vorausgesetzt sind <a href="https://react.dev/learn/lifecycle-of-reactive-effects">der Lebenszyklus reaktiver Effects</a>, <a href="https://react.dev/reference/react/useEffect">useEffect</a> und die Regel <a href="https://react.dev/reference/eslint-plugin-react-hooks/lints/exhaustive-deps">exhaustive-deps</a>. Die aktuelle Referenz dokumentiert <a href="https://react.dev/reference/react/useEffectEvent">useEffectEvent</a> für React 19.3; stabil veröffentlicht wurde der Hook mit <a href="https://react.dev/blog/2025/10/01/react-19-2">React 19.2</a>.</p>
+
+    <h2>Der Aha-Effekt</h2>
+    <p>„Aktuell“ und „reaktiv“ sind zwei verschiedene Anforderungen. Die Benachrichtigung soll beim später eintreffenden <code>connected</code>-Ereignis das aktuelle Theme sehen. Das Theme entscheidet aber nicht, zu welchem Raum der Socket gehört. <code>roomId</code> ist deshalb reaktiv für die Verbindung; <code>theme</code> ist nur eine aktuelle Eingabe für die Ereignisreaktion.</p>
+    <div class="callout"><strong>Dokumentierter Fakt:</strong> Ein Effect Event sieht die neuesten committeten Renderwerte. Es darf nur aus Effects oder anderen Effect Events aufgerufen, nicht an Kinder weitergereicht und nicht in eine Dependency-Liste aufgenommen werden.</div>
+
+    <h2>So macht man es falsch</h2>
+    <p>Die ehrliche Dependency-Liste ist hier formal korrekt, koppelt aber zwei verschiedene Lebenszyklen. Jeder Theme-Wechsel zerstört die Verbindung und erzeugt eine neue.</p>
+    <pre><code>// ChatRoom.tsx – problematischer Ausschnitt
+import { useEffect } from "react";
+import { createConnection } from "./chat";
+
+type Theme = "light" | "dark";
+type Props = { roomId: string; theme: Theme };
+
+export function ChatRoom({ roomId, theme }: Props) {
+  useEffect(() =&gt; {
+    const connection = createConnection(roomId);
+    connection.on("connected", () =&gt; {
+      showNotification("Verbunden", theme);
+    });
+    connection.connect();
+    return () =&gt; connection.disconnect();
+  }, [roomId, theme]);
+
+  return &lt;p&gt;Raum: {roomId}&lt;/p&gt;;
+}</code></pre>
+    <p>Das häufige „Gegenmittel“, <code>theme</code> aus der Liste zu löschen oder den Linter zu deaktivieren, ist schlechter: Der Callback kann dann ein altes Theme aus seiner Closure lesen. Die Komponente enthält weiterhin dieselbe Abhängigkeit, sie wird nur unsichtbar.</p>
+
+    <h2>Warum ist das falsch?</h2>
+    <p>React führt vor einer Re-Synchronisierung zunächst das Cleanup des vorherigen Effects aus und startet anschließend das neue Setup. Das beobachtbare Symptom ist daher nicht bloß ein zusätzlicher Render, sondern ein fachlicher Disconnect/Connect-Zyklus. Je nach System kann dieser Präsenzstatus, Subscriptions oder laufende Nachrichten beeinflussen. Eine konkrete Lastwirkung wird hier nicht behauptet; sie müsste im realen System gemessen werden.</p>
+
+    <h2>So macht man es richtig</h2>
+    <p>Ziehe nur den nicht-reaktiven Ereignisteil in ein Effect Event. Der Effect behält alle Werte, die seine externe Ressource definieren.</p>
+    <pre><code>// chat.ts – benötigter Vertrag
+export type Connection = {
+  on(event: "connected", listener: () =&gt; void): void;
+  connect(): void;
+  disconnect(): void;
+};
+export declare function createConnection(roomId: string): Connection;
+
+// ChatRoom.tsx – verbesserter Ausschnitt
+import { useEffect, useEffectEvent } from "react";
+import { createConnection } from "./chat";
+
+type Theme = "light" | "dark";
+type Props = { roomId: string; theme: Theme };
+
+export function ChatRoom({ roomId, theme }: Props) {
+  const onConnected = useEffectEvent(() =&gt; {
+    showNotification("Verbunden", theme);
+  });
+
+  useEffect(() =&gt; {
+    const connection = createConnection(roomId);
+    connection.on("connected", onConnected);
+    connection.connect();
+    return () =&gt; connection.disconnect();
+  }, [roomId]);
+
+  return &lt;p&gt;Raum: {roomId}&lt;/p&gt;;
+}</code></pre>
+    <p>Der Trade-off ist eine schärfere semantische Grenze: <code>onConnected</code> ist kein allgemeines Callback. Soll eine Funktion aus einem Click-Handler laufen oder an ein Kind gehen, ist eine normale Funktion beziehungsweise <code>useCallback</code> die passendere API. In React-Versionen vor 19.2 kann ein Ref den neuesten Wert bereitstellen, verlangt aber manuelle Synchronisierung und entzieht die Beziehung weitgehend dem Dependency-Linter.</p>
+
+    <h2>Diagramm</h2>
+    <figure>
+      <pre class="mermaid">flowchart TD
+  A[roomId ändert sich] --&gt; B[Effect synchronisiert]
+  B --&gt; C[Socket-Verbindung]
+  C -- connected --&gt; D[Effect Event]
+  E[aktuelles Theme] --&gt; D</pre>
+      <figcaption class="fallback">Textliche Erklärung: Nur eine geänderte roomId erneuert die Socket-Verbindung. Wenn der Socket „connected“ meldet, liest das Effect Event das zu diesem Zeitpunkt aktuelle Theme.</figcaption>
+    </figure>
+
+    <h2>Fallstricke am Rand</h2>
+    <ul>
+      <li>Ein Effect Event darf echte Synchronisierungsparameter nicht verstecken.</li>
+      <li>Seine Funktionsidentität ist absichtlich nicht stabil; nimm es nicht in Dependencies auf.</li>
+      <li>Definiere und verwende es lokal beim zugehörigen Effect, statt es durch Komponenten oder Hooks zu reichen.</li>
+    </ul>
+
+    <h2>Selbst ausprobieren</h2>
+    <p>Ersetze <code>createConnection</code> für zehn Minuten durch einen Fake, der <code>connect</code> und <code>disconnect</code> zählt. Rendere mit <code>roomId="support"</code>, ändere fünfmal das Theme und danach einmal die Raum-ID. Erwartung mit Effect Event: Der Theme-Wechsel erzeugt keinen neuen Verbindungszyklus; erst die neue Raum-ID führt zu genau einem Disconnect und einem weiteren Connect. Die spätere „Verbunden“-Meldung nutzt trotzdem das letzte Theme.</p>
+
+    <h2>Verwandte Themen</h2>
+    <ul>
+      <li><strong>Stale Closures:</strong> Sie erklären, warum das bloße Weglassen einer Dependency alte Werte konserviert.</li>
+      <li><strong>useCallback:</strong> Es stabilisiert eine weitergegebene Identität, trennt aber nicht automatisch Reaktivität.</li>
+      <li><strong>Effect-Cleanup:</strong> Seine Symmetrie entscheidet, ob Re-Synchronisierung Ressourcen korrekt ersetzt.</li>
+      <li><strong>External Stores:</strong> Für gemeinsam genutzte Subscriptions kann <code>useSyncExternalStore</code> die passendere Grenze sein.</li>
+    </ul>
+
+    <h2>Quellen</h2>
+    <ul>
+      <li><a href="https://react.dev/reference/react/useEffectEvent">React Reference: useEffectEvent</a></li>
+      <li><a href="https://react.dev/learn/separating-events-from-effects">React Learn: Separating Events from Effects</a></li>
+      <li><a href="https://react.dev/learn/lifecycle-of-reactive-effects">React Learn: Lifecycle of Reactive Effects</a></li>
+      <li><a href="https://react.dev/blog/2025/10/01/react-19-2">React 19.2 Release Notes</a></li>
+      <li><a href="https://react.dev/blog/2026/09/09/react-19-3">React 19.3 Release Notes</a></li>
+      <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+    </ul>
+
+    <hr>
+    <div class="footer-lines">
+      <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 15.11.2026 | Ein Effect Event trennt Aktualität von Reaktivität | React-Effects | Tief;</p>
+      <p>Bereich-Rotation: heute React-Effects → morgen z. B. TypeScript-Typsystem;</p>
+      <p>Unsicher geblieben: Die TSX-Ausschnitte konnten lokal ohne verfügbare React-Pakete und Typdefinitionen nicht kompiliert werden.</p>
+    </div>
+  </article>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
