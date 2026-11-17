@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Type Predicate verspricht auch den false-Zweig</title>
+  <meta name="description" content="Warum ein TypeScript Type Predicate eine bidirektionale Zusage ist und zusammengesetzte Geschäftsregeln meist nur boolean zurückgeben sollten.">
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#e4e4df;--accent:#3157c8;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#111316;--paper:#191c20;--text:#ecebe8;--muted:#adb2ba;--line:#343940;--accent:#9bb0ff;--code:#23272d;--note:#20283c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <article>
+    <header>
+      <h1>Ein Type Predicate verspricht auch den false-Zweig</h1>
+      <p class="subtitle">Eine Geschäftsregel ist nicht automatisch ein Type Guard – selbst wenn jeder Treffer denselben Typ hat.</p>
+      <p class="meta">TypeScript-Typsystem · TypeScript 6.0, Predicate-Inferenz seit 5.5 · Tief · ~8 min</p>
+    </header>
+
+    <p class="lead">Eine Event-App trennt aktive Mitglieder von Gästen. Der positive Zweig funktioniert: Wer den Check besteht, ist sicher ein Mitglied. Wochen später verwendet ein Kollege denselben Check in einer <code>partition</code>-Funktion – und behandelt plötzlich inaktive Mitglieder als Gäste.</p>
+
+    <h2>TL;DR</h2>
+    <p>Die Signatur <code>value is T</code> ist eine bidirektionale Zusage: <code>true</code> bedeutet <code>T</code>, <code>false</code> bedeutet „nicht <code>T</code>“. Liefert eine Bedingung auch für manche Werte aus <code>T</code> den Wert <code>false</code>, ist sie kein gültiges Type Predicate. Nutze für solche Geschäftsregeln ein gewöhnliches <code>boolean</code> und trenne strukturelles Narrowing von fachlicher Selektion.</p>
+
+    <h2>Prerequisites</h2>
+    <p>Du solltest <a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#using-type-predicates">user-defined Type Guards</a>, Unions und Generics kennen. Der Artikel bezieht sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>. Die automatische <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-5.html#inferred-type-predicates">Inference einfacher Type Predicates</a> kam mit TypeScript 5.5.</p>
+
+    <h2>Der Aha-Effekt</h2>
+    <p>TypeScript narrowt in beiden Kontrollflusszweigen. Die offizielle Dokumentation zeigt: Nach <code>isFish(pet)</code> ist der Wert im <code>if</code>-Zweig ein Fisch und im <code>else</code>-Zweig kein Fisch. Die 5.5 Release Notes formulieren das ausdrücklich als „if and only if“-Semantik und weisen darauf hin, dass explizite <code>is</code>-Annotationen vom Compiler nicht gegen ihre Implementierung geprüft werden.</p>
+    <div class="callout"><strong>Eigene Schlussfolgerung:</strong> Schreibe ein Type Predicate nur, wenn du sowohl den positiven als auch den negativen Satz in einem Code Review verteidigen kannst.</div>
+
+    <h2>So macht man es falsch</h2>
+    <p>Der folgende Guard vermischt die Typfrage „Mitglied oder Gast?“ mit der Geschäftsfrage „aktiver Tarif?“. Sein positiver Zweig ist korrekt, sein negativer Zweig nicht.</p>
+    <pre><code>// Ausschnitt: realistische Fehlervariante
+type Guest = { kind: "guest"; passId: string };
+type Member = {
+  kind: "member";
+  accountId: string;
+  plan: "active" | "paused";
+};
+type Attendee = Guest | Member;
+
+function isActiveMember(value: Attendee): value is Member {
+  return value.kind === "member" &amp;&amp; value.plan === "active";
+}
+
+function partition&lt;T, S extends T&gt;(
+  values: readonly T[],
+  predicate: (value: T) =&gt; value is S
+): [S[], Exclude&lt;T, S&gt;[]] {
+  const yes: S[] = [];
+  const no: Exclude&lt;T, S&gt;[] = [];
+  for (const value of values) {
+    if (predicate(value)) yes.push(value);
+    else no.push(value as Exclude&lt;T, S&gt;);
+  }
+  return [yes, no];
+}
+
+const [activeMembers, guests] = partition(attendees, isActiveMember);
+// TypeScript glaubt: guests ist Guest[]
+guests.map(guest =&gt; guest.passId.toUpperCase());</code></pre>
+
+    <h2>Warum ist das falsch?</h2>
+    <p>Ein pausiertes Mitglied liefert <code>false</code>, ist aber weiterhin ein <code>Member</code>. Zur Laufzeit landet es im zweiten Array; statisch ist dieses Array durch <code>Exclude&lt;Attendee, Member&gt;</code> als <code>Guest[]</code> typisiert. Der Zugriff auf <code>passId</code> ergibt dann <code>undefined</code>, der anschließende Methodenaufruf scheitert.</p>
+    <p>Das Problem sitzt nicht in der generischen Partition: Sie kann ihren Vertrag nur erfüllen, wenn das übergebene Predicate seinen eigenen Vertrag erfüllt. Eine explizite Predicate-Annotation wirkt hier wie eine Type Assertion an einer besonders wiederverwendbaren Stelle.</p>
+
+    <h2>So macht man es richtig</h2>
+    <p>Verwende für die vollständige Typgrenze einen echten Guard. Innerhalb der bereits verengten Menge bleibt die Tarifprüfung ein <code>boolean</code>. Eine zweite Partition darf deshalb keine Typen ausschließen.</p>
+    <pre><code>// Vollständige, sichere Aufteilung
+function isMember(value: Attendee): value is Member {
+  return value.kind === "member";
+}
+
+function hasActivePlan(value: Member): boolean {
+  return value.plan === "active";
+}
+
+function splitBy&lt;T&gt;(
+  values: readonly T[],
+  predicate: (value: T) =&gt; boolean
+): [T[], T[]] {
+  const yes: T[] = [];
+  const no: T[] = [];
+  for (const value of values) (predicate(value) ? yes : no).push(value);
+  return [yes, no];
+}
+
+const [members, guests] = partition(attendees, isMember);
+const [activeMembers, inactiveMembers] = splitBy(members, hasActivePlan);
+// guests: Guest[]; beide Member-Gruppen: Member[]</code></pre>
+    <p>Der Trade-off ist mehrstufiger Code, dafür bildet jede Stufe genau eine Aussage ab. Als Alternative kann eine Funktion eine discriminated union wie <code>{ status: "eligible"; member: Member }</code> oder <code>{ status: "rejected"; reason: ... }</code> zurückgeben. Das lohnt sich, wenn die Ablehnungsgründe fachlich relevant sind.</p>
+
+    <h2>Diagramm</h2>
+    <figure>
+      <pre class="mermaid">flowchart TD
+  A[Attendee] --&gt; B[isActiveMember]
+  B -- true --&gt; C[Member]
+  B -- false, statisch --&gt; D[Guest]
+  B -- false, tatsächlich --&gt; E[Guest oder pausiertes Member]</pre>
+      <figcaption class="fallback">Textliche Erklärung: Der positive Zweig enthält nur Mitglieder. Der negative Zweig enthält zur Laufzeit jedoch Gäste und pausierte Mitglieder, obwohl die Predicate-Signatur dem Compiler ausschließlich Gäste verspricht.</figcaption>
+    </figure>
+
+    <h2>Fallstricke am Rand</h2>
+    <ul>
+      <li>Zusammengesetzte Bedingungen mit <code>&amp;&amp;</code> sind verdächtig, wenn der zweite Teil nur eine Teilmenge des Zieltyps akzeptiert.</li>
+      <li><code>Array.filter</code> nutzt nur Treffer; ein fehlerhafter false-Vertrag wird oft erst bei <code>else</code>, <code>partition</code> oder Wiederverwendung sichtbar.</li>
+      <li>Runtime-Validierung unbekannter Daten bleibt nötig; ein Predicate validiert nur so viel wie seine Implementierung tatsächlich prüft.</li>
+    </ul>
+
+    <h2>Selbst ausprobieren</h2>
+    <p>Lege in zehn Minuten drei Werte an: einen Gast, ein aktives und ein pausiertes Mitglied. Führe die falsche Partition aus und protokolliere <code>kind</code> im angeblichen Gäste-Array. Erwartung: Dort erscheint auch <code>member</code>. Tausche anschließend den Guard gegen <code>isMember</code> und partitioniere die Mitglieder separat mit dem booleschen Tarifcheck. Nun entsprechen Laufzeitwerte und statische Gruppen einander.</p>
+
+    <h2>Verwandte Themen</h2>
+    <ul>
+      <li><strong>Assertion Functions:</strong> Sie versprechen ebenfalls mehr, als TypeScript aus der Implementierung beweist.</li>
+      <li><strong>Runtime-Schemas:</strong> Sie bündeln Validierung und Typableitung an Datenaußengrenzen.</li>
+      <li><strong>Discriminated Unions:</strong> Sie machen fachliche Ergebnisse und Ablehnungsgründe explizit.</li>
+      <li><strong>Conditional Types:</strong> <code>Exclude</code> ist korrekt, kann aber einen falschen Predicate-Vertrag nicht reparieren.</li>
+    </ul>
+
+    <h2>Quellen</h2>
+    <ul>
+      <li><a href="https://www.typescriptlang.org/docs/handbook/2/narrowing.html#using-type-predicates">TypeScript Handbook: Using type predicates</a></li>
+      <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-5.html#inferred-type-predicates">TypeScript 5.5: Inferred Type Predicates</a></li>
+      <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+      <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+    </ul>
+
+    <hr>
+    <div class="footer-lines">
+      <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 17.11.2026 | Ein Type Predicate verspricht auch den false-Zweig | TypeScript-Typsystem | Tief;</p>
+      <p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. Datenzugriff &amp; Tests;</p>
+      <p>Unsicher geblieben: Ein vollständiger TypeScript-Compile-Lauf war lokal ohne installierten Compiler nicht möglich; das beschriebene Laufzeitverhalten wurde separat getestet.</p>
+    </div>
+  </article>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
