@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Revalidierungsfehler darf brauchbare Daten nicht löschen</title>
+  <meta name="description" content="Warum React-Oberflächen vorhandene Daten und den Zustand eines Hintergrund-Refreshs getrennt modellieren sollten.">
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#e4e4df;--accent:#3157c8;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#111316;--paper:#191c20;--text:#ecebe8;--muted:#adb2ba;--line:#343940;--accent:#9bb0ff;--code:#23272d;--note:#20283c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <article>
+    <header>
+      <h1>Ein Revalidierungsfehler darf brauchbare Daten nicht löschen</h1>
+      <p class="subtitle">Der Zustand deiner Daten ist nicht derselbe wie der Zustand des letzten Ladeversuchs.</p>
+      <p class="meta">Datenzugriff &amp; State-Modellierung · React 19.2 + Fetch API · Tief · ~8 min</p>
+    </header>
+
+    <p class="lead">Eine Produktliste ist geladen. Beim Zurückkehren in den Tab startet ein Hintergrund-Refresh, das WLAN bricht kurz ab – und die gesamte Liste wird durch „Laden fehlgeschlagen“ ersetzt. Der Server hat keine Daten widerrufen. Nur der jüngste Aktualisierungsversuch ist gescheitert.</p>
+
+    <h2>TL;DR</h2>
+    <p>Modelliere „nutzbare Daten vorhanden?“ getrennt von „Request läuft oder ist fehlgeschlagen?“. Ein Fehler beim initialen Laden ist ein blockierender Zustand. Ein Fehler bei der Revalidierung ist dagegen Metadatum zu weiterhin nutzbaren, nun möglicherweise veralteten Daten. Behalte diese Daten sichtbar und biete einen erneuten Versuch an.</p>
+
+    <h2>Prerequisites</h2>
+    <p>Du solltest <a href="https://react.dev/learn/choosing-the-state-structure">React-State strukturiert modellieren</a>, <a href="https://react.dev/reference/react/useReducer"><code>useReducer</code></a> einsetzen und Requests mit der <a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">Fetch API</a> ausführen können. Der Versionsbezug ist React 19.2; die Entscheidung selbst ist nicht an eine spezielle React-API gebunden.</p>
+
+    <h2>Der Aha-Effekt</h2>
+    <p>„Fehler“ beantwortet nur, wie ein Versuch endete. Er beantwortet nicht, ob darstellbare Daten existieren. Bei der ersten Anfrage fallen beide Fragen zusammen. Nach einem erfolgreichen Laden können sie auseinanderlaufen: Die Daten sind vorhanden, während die Revalidierung läuft oder scheitert.</p>
+    <div class="callout"><strong>Eigene Schlussfolgerung:</strong> Ein State-Modell sollte den sichtbaren Informationsbestand beschreiben, nicht bloß den Lebenszyklus des zuletzt gestarteten Promises.</div>
+
+    <h2>So macht man es falsch</h2>
+    <p>Diese übliche Union ist für ein einmaliges Laden korrekt. Sobald dieselbe Funktion auch einen Hintergrund-Refresh ausführt, vernichtet <code>loading</code> beziehungsweise <code>error</code> die Information, dass bereits Daten vorhanden waren.</p>
+    <pre><code>// Ausschnitt: Fehlervariante
+type LoadState&lt;T&gt; =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "success"; data: T }
+  | { status: "error"; error: Error };
+
+const asError = (value: unknown): Error =&gt;
+  value instanceof Error ? value : new Error(String(value));
+
+async function refresh() {
+  setState({ status: "loading" });
+  try {
+    const response = await fetch("/api/products");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    setState({ status: "success", data: await response.json() });
+  } catch (error) {
+    setState({ status: "error", error: asError(error) });
+  }
+}
+
+if (state.status === "loading") return &lt;Spinner /&gt;;
+if (state.status === "error") return &lt;FullPageError /&gt;;</code></pre>
+
+    <h2>Warum ist das falsch?</h2>
+    <p>Der zweite Request ersetzt den gesamten fachlichen Zustand durch einen Transportzustand. Dadurch flackert die Oberfläche schon während des Refreshs; bei einem Fehler verschwinden Daten, die wenige Millisekunden zuvor noch als gültig galten. React empfiehlt, widersprüchliche oder unnötig duplizierte Zustände durch eine passende State-Struktur zu vermeiden. Hier ist das Problem umgekehrt: Eine einzige Achse wurde zu stark vereinfacht.</p>
+    <p>Auch <code>fetch()</code> macht diese Unterscheidung nicht für dich. Laut MDN wird sein Promise bei HTTP-Fehlerstatus wie 404 nicht automatisch abgelehnt; <code>Response.ok</code> muss geprüft werden. Ob ein solcher Fehler vorhandene Daten unbrauchbar macht, bleibt eine fachliche Entscheidung.</p>
+
+    <h2>So macht man es richtig</h2>
+    <p>Die Union unterscheidet initiales Scheitern von einer fehlgeschlagenen Revalidierung. Im <code>ready</code>-Zweig bleiben die Daten immer erhalten; Request-Metadaten verändern nur die Darstellung daneben.</p>
+    <pre><code>import { useReducer } from "react";
+
+type ResourceState&lt;T&gt; =
+  | { status: "initial-loading" }
+  | { status: "initial-error"; error: Error }
+  | {
+      status: "ready";
+      data: T;
+      refreshing: boolean;
+      refreshError?: Error;
+    };
+
+type Action&lt;T&gt; =
+  | { type: "requested" }
+  | { type: "succeeded"; data: T }
+  | { type: "failed"; error: Error };
+
+function reducer&lt;T&gt;(
+  state: ResourceState&lt;T&gt;,
+  action: Action&lt;T&gt;
+): ResourceState&lt;T&gt; {
+  switch (action.type) {
+    case "requested":
+      return state.status === "ready"
+        ? { ...state, refreshing: true, refreshError: undefined }
+        : { status: "initial-loading" };
+    case "succeeded":
+      return { status: "ready", data: action.data, refreshing: false };
+    case "failed":
+      return state.status === "ready"
+        ? { ...state, refreshing: false, refreshError: action.error }
+        : { status: "initial-error", error: action.error };
+  }
+}</code></pre>
+    <p>Ein Reducer ist nicht zwingend; dieselbe Invariante lässt sich mit einem Query-Cache oder einer kleineren Union abbilden. Der Trade-off sind mehr Zustände und eine bewusste UI für „veraltet, Refresh fehlgeschlagen“. Dafür bleibt der Informationsverlust ausgeschlossen. Wenn Daten aus Sicherheits- oder Korrektheitsgründen nach Ablauf zwingend frisch sein müssen, ist das Ausblenden eine legitime Alternative – dann sollte die Gültigkeitsfrist Teil des Modells sein.</p>
+
+    <h2>Diagramm</h2>
+    <figure>
+      <pre class="mermaid">stateDiagram-v2
+  [*] --&gt; InitialLoading
+  InitialLoading --&gt; InitialError: Fehler ohne Daten
+  InitialLoading --&gt; Ready: Erfolg
+  Ready --&gt; Refreshing: Revalidierung
+  Refreshing --&gt; Ready: neue Daten
+  Refreshing --&gt; ReadyStale: Fehler, alte Daten bleiben
+  ReadyStale --&gt; Refreshing: erneut versuchen</pre>
+      <figcaption class="fallback">Textliche Erklärung: Nur ein Fehler ohne vorhandene Daten führt zum initialen Fehlerzustand. Scheitert eine Revalidierung, bleiben die alten Daten sichtbar und werden als möglicherweise veraltet markiert.</figcaption>
+    </figure>
+
+    <h2>Fallstricke am Rand</h2>
+    <ul>
+      <li>Ein <code>AbortError</code> beim Unmount ist kein anzuzeigender Refresh-Fehler.</li>
+      <li>Alte Daten brauchen eine erkennbare Aktualisierungszeit, wenn ihre Frische fachlich relevant ist.</li>
+      <li>Ein erfolgreicher leerer Datensatz ist nicht dasselbe wie „noch keine Daten“.</li>
+    </ul>
+
+    <h2>Selbst ausprobieren</h2>
+    <p>Baue in zehn Minuten einen Reducer-Test: Starte mit <code>initial-loading</code>, dispatch danach <code>succeeded</code> mit zwei Produkten, anschließend <code>requested</code> und <code>failed</code>. Erwartung: Der Endzustand ist weiterhin <code>ready</code>, enthält beide Produkte und zusätzlich <code>refreshError</code>. Wiederhole denselben Fehler ohne vorherigen Erfolg; nun muss <code>initial-error</code> entstehen.</p>
+
+    <h2>Verwandte Themen</h2>
+    <ul>
+      <li><strong>Stale-while-revalidate:</strong> Ein Cache kann alte Daten sofort liefern und parallel aktualisieren.</li>
+      <li><strong>Error Boundaries:</strong> Sie behandeln Renderfehler, nicht automatisch asynchrone Fetch-Fehler.</li>
+      <li><strong>Request-Abbruch:</strong> <code>AbortController</code> verhindert unnötige Arbeit, ersetzt aber keine State-Invariante.</li>
+      <li><strong>Observability:</strong> Hintergrundfehler sollten messbar bleiben, auch wenn die UI weiterhin Daten zeigt.</li>
+    </ul>
+
+    <h2>Quellen</h2>
+    <ul>
+      <li><a href="https://react.dev/learn/choosing-the-state-structure">React: Choosing the State Structure</a></li>
+      <li><a href="https://react.dev/reference/react/useReducer">React: useReducer</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">MDN: Using the Fetch API</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortController/abort">MDN: AbortController.abort()</a></li>
+      <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+    </ul>
+
+    <hr>
+    <div class="footer-lines">
+      <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 18.11.2026 | Ein Revalidierungsfehler darf brauchbare Daten nicht löschen | Datenzugriff &amp; State-Modellierung | Tief;</p>
+      <p>Bereich-Rotation: heute Datenzugriff &amp; State-Modellierung → morgen z. B. React-Komponenten-APIs;</p>
+      <p>Unsicher geblieben: nichts.</p>
+    </div>
+  </article>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
