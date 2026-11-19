@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Slot braucht einen Besitzer für seine Props</title>
+  <meta name="description" content="Wann eine React-Komponenten-API ReactNode, ComponentType oder eine Render-Funktion akzeptieren sollte.">
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#e4e4df;--accent:#3157c8;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#111316;--paper:#191c20;--text:#ecebe8;--muted:#adb2ba;--line:#343940;--accent:#9bb0ff;--code:#23272d;--note:#20283c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <article>
+    <header>
+      <h1>Ein Slot braucht einen Besitzer für seine Props</h1>
+      <p class="subtitle"><code>ReactNode</code>, <code>ComponentType</code> und Render-Funktion sind keine austauschbaren Schreibweisen.</p>
+      <p class="meta">React-Komponenten-APIs · React 19.2 + TypeScript 6.0 · Tief · ~8 min</p>
+    </header>
+
+    <p class="lead">Eine Datentabelle akzeptiert eine frei gestaltbare Leerseite. Später soll sie diesem Slot <code>compact</code> und <code>onRetry</code> übergeben. Die API nimmt jedoch bereits fertiges JSX entgegen. Also klont die Tabelle das Element und injiziert Props – bis jemand einen String, ein Fragment oder eine Komponente mit anderen Props übergibt.</p>
+
+    <h2>TL;DR</h2>
+    <p>Nutze <code>ReactNode</code>, wenn der Aufrufer fertigen Inhalt besitzt und der Empfänger ihn nur platziert. Nutze <code>ComponentType&lt;P&gt;</code>, wenn der Empfänger eine Komponente instanziiert und ihre Props kontrolliert. Soll der Aufrufer Markup und Props verknüpfen, ist eine Render-Funktion <code>(props: P) =&gt; ReactNode</code> die expliziteste Grenze. Vermeide APIs, die einen beliebigen Node annehmen und später per <code>cloneElement</code> umschreiben.</p>
+
+    <h2>Prerequisites</h2>
+    <p>Du solltest <a href="https://react.dev/learn/passing-props-to-a-component">Props und JSX-Slots</a> sowie TypeScript-Funktionstypen kennen. React dokumentiert <a href="https://react.dev/learn/typescript"><code>ReactNode</code></a> als Typ für alle Werte, die React rendern kann. Der Artikel bezieht sich auf React 19.2 und <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+
+    <h2>Der Aha-Effekt</h2>
+    <p>Ein React-Element ist bereits das Ergebnis einer Elementerzeugung: Es enthält einen Typ und die Props dieses konkreten Renderings. Eine Komponentenreferenz ist dagegen noch instanziierbar. Wer <code>ComponentType&lt;P&gt;</code> entgegennimmt, kann beim Rendern ein neues Element mit exakt den vereinbarten Props erzeugen. Die Typwahl entscheidet damit über Eigentum, nicht nur über Syntax.</p>
+    <div class="callout"><strong>Prüffrage fürs API-Review:</strong> Darf der Empfänger Props hinzufügen? Dann darf der Parameter nicht bloß „irgendetwas Renderbares“ sein.</div>
+
+    <h2>So macht man es falsch</h2>
+    <p>Die Tabelle verspricht zunächst maximale Freiheit mit <code>ReactNode</code>. Intern benötigt sie aber eine engere Schnittstelle und erzwingt diese nachträglich durch Laufzeitprüfung und Assertion.</p>
+    <pre><code>import {
+  cloneElement,
+  isValidElement,
+  type ReactNode,
+} from "react";
+
+type EmptyStateProps = {
+  compact: boolean;
+  onRetry(): void;
+};
+
+type DataTableProps = {
+  emptyState: ReactNode;
+  compact: boolean;
+  onRetry(): void;
+};
+
+export function DataTable(props: DataTableProps) {
+  if (!isValidElement(props.emptyState)) {
+    return &lt;div&gt;{props.emptyState}&lt;/div&gt;;
+  }
+
+  return cloneElement(
+    props.emptyState,
+    {
+      compact: props.compact,
+      onRetry: props.onRetry,
+    } as Partial&lt;EmptyStateProps&gt;
+  );
+}</code></pre>
+
+    <h2>Warum ist das falsch?</h2>
+    <p><code>ReactNode</code> umfasst mehr als Elemente: unter anderem Strings, Zahlen, leere Werte, Arrays und Portale. Selbst ein gültiges Element garantiert nicht, dass sein Komponententyp <code>compact</code> oder <code>onRetry</code> akzeptiert. Die Assertion beseitigt genau die Prüfung, die die öffentliche API leisten sollte.</p>
+    <p>React bezeichnet <code>cloneElement</code> selbst als selten und potenziell fragil. Das Klonen erschwert den Datenfluss, überschreibt gleichnamige Props und behandelt <code>key</code> sowie <code>ref</code> besonders. Das beobachtbare Symptom ist eine API, deren Signatur mehr erlaubt als ihre Implementierung tatsächlich unterstützt.</p>
+
+    <h2>So macht man es richtig</h2>
+    <p>Wenn die Tabelle die Props besitzt, akzeptiert sie einen Komponententyp mit genau diesem Vertrag. JSX erzeugt daraus ein neues Element; TypeScript prüft beide Seiten der Grenze.</p>
+    <pre><code>import type { ComponentType, ReactNode } from "react";
+
+type EmptyStateProps = {
+  compact: boolean;
+  onRetry(): void;
+};
+
+type DataTableProps = {
+  EmptyState: ComponentType&lt;EmptyStateProps&gt;;
+  compact: boolean;
+  onRetry(): void;
+};
+
+export function DataTable({
+  EmptyState,
+  compact,
+  onRetry,
+}: DataTableProps) {
+  return &lt;EmptyState compact={compact} onRetry={onRetry} /&gt;;
+}
+
+// Der Aufrufer übergibt den Typ, nicht &lt;ProductEmptyState /&gt;.
+&lt;DataTable EmptyState={ProductEmptyState} {...tableProps} /&gt;;
+
+// Alternative: Der Aufrufer besitzt das Markup.
+type RenderSlot = (props: EmptyStateProps) =&gt; ReactNode;</code></pre>
+    <p><code>ComponentType</code> setzt eine feste Prop-Schnittstelle voraus und erzeugt eine sichtbare Komponenten-Grenze. Eine Render-Funktion ist flexibler, weil sie Props in beliebiges Markup übersetzen kann; dafür wird sie bei jedem Aufruf als normale Funktion der API ausgeführt. Für rein statischen Inhalt bleibt <code>ReactNode</code> die einfachste Alternative – solange der Empfänger ihn unverändert rendert.</p>
+
+    <h2>Diagramm</h2>
+    <figure>
+      <pre class="mermaid">flowchart TD
+  A[Slot entwerfen] --&gt; B{Empfänger setzt Props?}
+  B -- nein --&gt; C[ReactNode]
+  B -- ja, Empfänger besitzt Instanz --&gt; D["ComponentType&lt;P&gt;"]
+  B -- ja, Aufrufer besitzt Markup --&gt; E[Render-Funktion]</pre>
+      <figcaption class="fallback">Textliche Erklärung: Unveränderter fertiger Inhalt wird als ReactNode übergeben. Muss der Empfänger Props setzen, erhält er entweder einen Komponententyp oder ruft eine Render-Funktion des Aufrufers mit diesen Props auf.</figcaption>
+    </figure>
+
+    <h2>Fallstricke am Rand</h2>
+    <ul>
+      <li>Eine Komponentenreferenz muss stabil außerhalb des Renderpfads definiert sein, sonst kann React ihre Identität als neuen Komponententyp behandeln.</li>
+      <li><code>ComponentType&lt;P&gt;</code> erlaubt Funktions- und Klassenkomponenten; eine reine Funktionssignatur kann absichtlich enger sein.</li>
+      <li>Ein optionaler Slot braucht eine explizite Default-Strategie statt eines erzwungenen Dummy-Elements.</li>
+    </ul>
+
+    <h2>Selbst ausprobieren</h2>
+    <p>Ersetze in zehn Minuten in einer kleinen <code>Panel</code>-Komponente den Prop <code>footer: ReactNode</code> durch <code>Footer: ComponentType&lt;{ onClose(): void }&gt;</code>. Übergib zuerst eine kompatible Komponente, danach eine ohne <code>onClose</code>. Erwartung: Die zweite Variante scheitert bereits beim Typecheck. Wechsle anschließend zu <code>renderFooter</code> und beobachte, dass der Aufrufer die Props explizit in sein JSX einbindet.</p>
+
+    <h2>Verwandte Themen</h2>
+    <ul>
+      <li><strong>Compound Components:</strong> Context verteilt Slot-Daten, wenn JSX-Komposition wichtiger als ein einzelner Prop ist.</li>
+      <li><strong>Polymorphe Komponenten:</strong> Ein <code>as</code>-Prop verschiebt ebenfalls Verantwortung für gültige Props.</li>
+      <li><strong>Refs:</strong> Imperative Fähigkeiten benötigen einen eigenen, expliziten Vertrag.</li>
+      <li><strong>Discriminated Props:</strong> Alternative Slot-Varianten lassen sich als gegenseitig ausschließende API modellieren.</li>
+    </ul>
+
+    <h2>Quellen</h2>
+    <ul>
+      <li><a href="https://react.dev/learn/typescript">React: Using TypeScript</a></li>
+      <li><a href="https://react.dev/learn/passing-props-to-a-component">React: Passing Props to a Component</a></li>
+      <li><a href="https://react.dev/reference/react/createElement">React: createElement</a></li>
+      <li><a href="https://react.dev/reference/react/cloneElement">React: cloneElement und Alternativen</a></li>
+      <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+      <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+    </ul>
+
+    <hr>
+    <div class="footer-lines">
+      <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 19.11.2026 | Ein Slot braucht einen Besitzer für seine Props | React-Komponenten-APIs | Tief;</p>
+      <p>Bereich-Rotation: heute React-Komponenten-APIs → morgen z. B. TypeScript-Typsystem;</p>
+      <p>Unsicher geblieben: Ein vollständiger TSX-Compile-Lauf war lokal ohne installierte React-Typen und ohne TypeScript-Compiler nicht möglich.</p>
+    </div>
+  </article>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
