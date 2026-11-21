@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Timeout muss die Arbeit abbrechen, nicht nur das Warten</title>
+  <meta name="description" content="Warum Promise.race keine Fetch-Operation abbricht und wie AbortSignal.timeout und AbortSignal.any eine echte Deadline modellieren.">
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#e4e4df;--accent:#3157c8;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#111316;--paper:#191c20;--text:#ecebe8;--muted:#adb2ba;--line:#343940;--accent:#9bb0ff;--code:#23272d;--note:#20283c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main><article>
+  <header>
+    <h1>Ein Timeout muss die Arbeit abbrechen, nicht nur das Warten</h1>
+    <p class="subtitle"><code>Promise.race</code> begrenzt die Geduld des Aufrufers – nicht die Lebenszeit eines Requests.</p>
+    <p class="meta">Datenzugriff &amp; Tests · TypeScript 6.0 + Web Fetch API · Tief · ~8 min</p>
+  </header>
+
+  <p class="lead">Die Produktsuche zeigt nach fünf Sekunden „Zeitüberschreitung“. Im Netzwerk-Panel läuft der Request trotzdem weiter und erreicht später den Server. Unter Last häufen sich genau diese unsichtbaren Verlierer: Die UI hat aufgegeben, aber Verbindung, Body-Download und Backend-Arbeit besitzen noch keinen Abbruchgrund.</p>
+
+  <h2>TL;DR</h2>
+  <p>Ein Timeout ist eine Deadline für die Operation, nicht bloß ein früher Fehler für ihren Aufrufer. <code>Promise.race</code> ignoriert das spätere Ergebnis des verlierenden Promises, storniert ihn aber nicht. Übergib stattdessen ein <code>AbortSignal</code> an <code>fetch</code>. Kombiniere eine Deadline aus <code>AbortSignal.timeout(ms)</code> mit einem vorhandenen Signal über <code>AbortSignal.any()</code>. Teste nicht nur die Fehlermeldung, sondern auch, dass die Arbeit das Signal beobachtet und beendet.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest Promises, <code>fetch</code> und <code>AbortController</code> kennen. Maßgeblich sind der <a href="https://dom.spec.whatwg.org/#aborting-ongoing-activities">DOM-Standard zu AbortSignal</a>, der <a href="https://fetch.spec.whatwg.org/">Fetch-Standard</a> sowie die Dokumentation zu <a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static"><code>AbortSignal.timeout()</code></a> und <a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/any_static"><code>AbortSignal.any()</code></a>. Die Typbeispiele beziehen sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Promises besitzen keinen eingebauten Abbruchmechanismus. <code>race</code> entscheidet nur, wessen Settlement den Ergebnis-Promise bestimmt. Die andere Operation erhält dadurch weder ein Ereignis noch eine Anweisung zum Stoppen. Abbruch ist ein separates Protokoll: Eine API akzeptiert ein Signal, prüft dessen Zustand, beendet ihre Arbeit und weist ihren noch offenen Promise mit dem Abbruchgrund zurück.</p>
+  <div class="callout"><strong>Review-Frage:</strong> Wenn dein Timeout gewinnt – welches Objekt informiert die laufende Arbeit darüber?</div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Diese Variante erzeugt zwar pünktlich einen Fehler, lässt aber den Fetch ohne Signal weiterlaufen:</p>
+  <pre><code>function timeoutAfter(ms: number): Promise&lt;never&gt; {
+  return new Promise((_, reject) =&gt; {
+    setTimeout(() =&gt; reject(new Error("timeout")), ms);
+  });
+}
+
+export async function loadProducts(query: string) {
+  const response = await Promise.race([
+    fetch(`/api/products?q=${encodeURIComponent(query)}`),
+    timeoutAfter(5_000),
+  ]);
+
+  return response.json();
+}</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Nach fünf Sekunden ist nur der von <code>Promise.race</code> zurückgegebene Promise abgelehnt. Der ursprüngliche Fetch bleibt erreichbar und darf weiter settlen; sein späteres Ergebnis wird lediglich nicht mehr verwendet. Das ist keine Race-Condition im UI, sondern eine auseinanderfallende Lebenszeit von Aufrufer und Arbeit.</p>
+  <p>Beobachtbare Symptome sind weiterlaufende Requests nach sichtbarem Timeout, unnötige Antwort-Downloads und Tests, die grün werden, obwohl ihr Fake später noch Nebenwirkungen ausführt. Ob ein abgebrochener Request serverseitige Arbeit tatsächlich stoppt, hängt vom Transport und Server ab. Dokumentiert und überprüfbar ist jedoch, dass Fetch den Signalgrund verarbeitet, seinen Promise zurückweist und betroffene Streams abbricht.</p>
+
+  <h2>So macht man es richtig</h2>
+  <p>Die Datenzugriffsgrenze besitzt die Deadline und reicht das kombinierte Signal bis zu <code>fetch</code> durch. Ein optionales Signal des Aufrufers bleibt erhalten, etwa für Navigation oder einen Abbrechen-Button.</p>
+  <pre><code>type FetchWithDeadlineOptions = Omit&lt;RequestInit, "signal"&gt; &amp; {
+  timeoutMs: number;
+  signal?: AbortSignal;
+};
+
+export async function fetchWithDeadline(
+  input: RequestInfo | URL,
+  { timeoutMs, signal, ...init }: FetchWithDeadlineOptions,
+): Promise&lt;Response&gt; {
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const combined = signal
+    ? AbortSignal.any([signal, deadline])
+    : deadline;
+
+  return fetch(input, { ...init, signal: combined });
+}
+
+const response = await fetchWithDeadline("/api/products", {
+  timeoutMs: 5_000,
+  signal: navigationController.signal,
+});</code></pre>
+  <p>Der Vorteil ist ein durchgängiger Abbruchvertrag und ein unterscheidbarer <code>TimeoutError</code>-Grund bei einem reinen Deadline-Signal. Der Trade-off: <code>AbortSignal.timeout()</code> lässt seinen internen Timeout nicht vorzeitig löschen. Für sehr viele lange Deadlines oder eigene Listener kann ein manueller <code>AbortController</code> mit <code>setTimeout</code>, <code>clearTimeout</code> im <code>finally</code> und sauberer Listener-Entfernung sinnvoller sein. Als Alternative kann eine Datenzugriffsbibliothek Signale bereitstellen; entscheidend bleibt, dass dein Fetch sie tatsächlich verwendet.</p>
+
+  <h2>Diagramm</h2>
+  <figure>
+    <pre class="mermaid">flowchart TD
+  A[Fetch starten] --&gt; B{Was endet zuerst?}
+  B -- Antwort --&gt; C[Response verwenden]
+  B -- Deadline --&gt; D[Signal abortiert]
+  B -- Navigation --&gt; D
+  D --&gt; E[Fetch und Streams beenden]</pre>
+    <figcaption class="fallback">Textliche Erklärung: Antwort, Deadline und externer Abbruch konkurrieren nicht nur um ein Ergebnis. Deadline oder Navigation abortieren dasselbe an Fetch übergebene Signal, sodass die Operation den Abbruch beobachten kann.</figcaption>
+  </figure>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Ein bereits abgebrochenes Eingangssignal macht auch das kombinierte Signal sofort abgebrochen.</li>
+    <li><code>AbortSignal.timeout()</code> misst aktive Zeit; eine suspendierte Seite oder ein suspendierter Worker kann die Deadline pausieren.</li>
+    <li>Fange <code>TimeoutError</code> nicht pauschal als leere Ergebnisliste ab – Timeout und „keine Treffer“ sind verschiedene Zustände.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Schreibe in zehn Minuten eine <code>slowOperation(signal)</code>, die nach 100 Millisekunden einen Zähler erhöht und bei <code>abort</code> ihren Timer löscht. Starte sie zuerst ohne Signal gegen einen ablehnenden 10-ms-Timer in <code>Promise.race</code>: Der Aufrufer sieht den Timeout, der Zähler steigt später trotzdem. Wiederhole den Test mit <code>AbortSignal.timeout(10)</code>. Erwartung: Die Operation meldet den Abbruch und der Zähler bleibt unverändert.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>Latest request wins:</strong> Relevanzprüfung verhindert veraltete State-Schreibvorgänge zusätzlich zum Ressourcenabbruch.</li>
+    <li><strong>Server-Timeouts:</strong> Client- und Server-Deadline sollten getrennt beobachtbar und korrelierbar sein.</li>
+    <li><strong>Retries:</strong> Ein Timeout darf nicht automatisch nicht-idempotente Operationen wiederholen.</li>
+    <li><strong>Fake Timer:</strong> Deterministische Tests müssen Timer und Abbruchereignis kontrolliert fortschalten.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/race">MDN: Promise.race()</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static">MDN: AbortSignal.timeout()</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/any_static">MDN: AbortSignal.any()</a></li>
+    <li><a href="https://dom.spec.whatwg.org/#aborting-ongoing-activities">WHATWG DOM: Aborting ongoing activities</a></li>
+    <li><a href="https://fetch.spec.whatwg.org/">WHATWG Fetch Standard</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+  </ul>
+
+  <hr>
+  <div class="footer-lines">
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 21.11.2026 | Ein Timeout muss die Arbeit abbrechen, nicht nur das Warten | Datenzugriff &amp; Tests | Tief;</p>
+    <p>Bereich-Rotation: heute Datenzugriff &amp; Tests → morgen z. B. React-Render-Verhalten;</p>
+    <p>Unsicher geblieben: Ein vollständiger TypeScript-Compile-Lauf war lokal ohne installierten TypeScript-Compiler nicht möglich.</p>
+  </div>
+</article></main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
