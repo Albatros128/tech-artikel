@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flushSync ist eine Integrationsgrenze, kein Update-Modus</title>
+  <meta name="description" content="Wann React-DOM-Arbeit in useLayoutEffect gehört und wann flushSync für eine synchrone Fremd-API gerechtfertigt ist.">
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f7f5;--paper:#fff;--text:#242424;--muted:#6b6b6b;--line:#e4e4df;--accent:#3157c8;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#111316;--paper:#191c20;--text:#ecebe8;--muted:#adb2ba;--line:#343940;--accent:#9bb0ff;--code:#23272d;--note:#20283c}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main><article>
+  <header>
+    <h1><code>flushSync</code> ist eine Integrationsgrenze, kein Update-Modus</h1>
+    <p class="subtitle">Synchronisiere React-eigene DOM-Arbeit mit dem Commit – und erzwinge synchrone Commits nur für fremde Taktgeber.</p>
+    <p class="meta">React-Render-Verhalten · React 19.3 + TypeScript 6.0 · Tief · ~8 min</p>
+  </header>
+
+  <p class="lead">Eine Chatliste hängt eine Nachricht an und scrollt direkt danach zum neuen Listenelement. Sporadisch findet <code>querySelector</code> nichts: <code>setMessages</code> hat ein Rendern angefordert, doch der Event-Handler läuft noch gegen den alten DOM. Der schnelle Fix umschließt jedes Update mit <code>flushSync</code>. Das Symptom verschwindet – und eine lokale Timing-Frage wird zum globalen Scheduling-Eingriff.</p>
+
+  <h2>TL;DR</h2>
+  <p>Wenn React den Ablauf kontrolliert, verschiebe DOM-Messung oder Scrollen in <code>useLayoutEffect</code>. Dieser Hook läuft nach dem Commit und vor dem nächsten Paint. Nutze <code>flushSync</code> nur, wenn eine synchrone Browser- oder Drittanbieter-API den aktualisierten DOM noch vor Rückkehr ihres Callbacks beobachten muss. <code>flushSync</code> darf zusätzliche Arbeit synchron ausführen, Suspense-Fallbacks erneut zeigen und die Performance beeinträchtigen; es ist kein Standardersatz für sauberes Commit-Timing.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest State-Snapshots, Effects und DOM-Refs kennen. React beschreibt <a href="https://react.dev/learn/state-as-a-snapshot">State als Snapshot</a>, dokumentiert <a href="https://react.dev/reference/react/useLayoutEffect"><code>useLayoutEffect</code></a> für Arbeit nach dem Commit und <a href="https://react.dev/reference/react-dom/flushSync"><code>flushSync</code></a> als seltenen Ausweg. Der Artikel bezieht sich auf die laut <a href="https://react.dev/versions">Versionsseite aktuelle React-Version 19.3</a> und <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Ein State-Setter mutiert weder die State-Variable des laufenden Renderings noch garantiert er einen DOM-Commit vor der nächsten JavaScript-Zeile. React darf Updates sammeln und den Bildschirm anschließend an den neuen Snapshot angleichen. Die richtige Abstraktion für React-eigene DOM-Arbeit ist deshalb nicht „schneller committen“, sondern „nach dem Commit ausführen“.</p>
+  <div class="callout"><strong>Entscheidende Frage:</strong> Wer besitzt die Deadline – Reacts Commit-Zyklus oder eine fremde synchrone API?</div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Dieser Code macht aus jedem Hinzufügen einen erzwungenen synchronen Commit, nur damit die nächste Zeile den neuen Knoten findet:</p>
+  <pre><code>import { useState } from "react";
+import { flushSync } from "react-dom";
+
+type Message = { id: string; text: string };
+
+export function Chat() {
+  const [messages, setMessages] = useState&lt;Message[]&gt;([]);
+
+  function appendAndScroll(text: string) {
+    const next = { id: crypto.randomUUID(), text };
+
+    flushSync(() =&gt; {
+      setMessages(current =&gt; [...current, next]);
+    });
+
+    document
+      .querySelector(`[data-message-id="${CSS.escape(next.id)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }
+
+  // Ausschnitt: Rendering der Liste
+}</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Der Code funktioniert, erweitert aber den Vertrag unnötig: Statt „scrolle nach dem Commit“ verlangt er „committe diese Aktualisierung jetzt synchron“. React weist darauf hin, dass <code>flushSync</code> auch ausstehende Updates außerhalb des Callbacks flushen, Effects ausführen und bei suspendierender Arbeit Fallbacks erneut sichtbar machen kann.</p>
+  <p>Beobachtbar wird das als eng gekoppelte Handlerlogik, unnötige synchrone Rendergrenzen und schwerer erklärbares Verhalten benachbarter Komponenten. Eine pauschale Performanceverbesserung oder -verschlechterung lässt sich ohne Messung nicht beziffern; dokumentiert ist jedoch, dass häufige synchrone Flushes Reacts Scheduling-Spielraum einschränken.</p>
+
+  <h2>So macht man es richtig</h2>
+  <p>Die Nachricht bleibt deklarativer Zustand; die einmalig benötigte Ziel-ID liegt als imperativer Marker in einem Ref. <code>useLayoutEffect</code> beobachtet den Commit und greift über einen zweiten, begrenzten Ref auf genau diese Liste zu.</p>
+  <pre><code>import { useLayoutEffect, useRef, useState } from "react";
+
+type Message = { id: string; text: string };
+
+export function Chat() {
+  const [messages, setMessages] = useState&lt;Message[]&gt;([]);
+  const listRef = useRef&lt;HTMLUListElement&gt;(null);
+  const pendingScrollId = useRef&lt;string | null&gt;(null);
+
+  function appendMessage(text: string) {
+    const next = { id: crypto.randomUUID(), text };
+    pendingScrollId.current = next.id;
+    setMessages(current =&gt; [...current, next]);
+  }
+
+  useLayoutEffect(() =&gt; {
+    const id = pendingScrollId.current;
+    if (id === null) return;
+    pendingScrollId.current = null;
+    listRef.current
+      ?.querySelector(
+        `[data-message-id="${CSS.escape(id)}"]`,
+      )
+      ?.scrollIntoView({ block: "nearest" });
+  }, [messages]);
+
+  return &lt;ul ref={listRef}&gt;{/* Nachrichten */}&lt;/ul&gt;;
+}</code></pre>
+  <p><code>useLayoutEffect</code> blockiert den Paint und sollte deshalb nur eingesetzt werden, wenn die Zwischenposition nicht sichtbar werden darf. Reicht ein Scrollen nach dem Paint, ist <code>useEffect</code> die günstigere Alternative. <code>flushSync</code> bleibt für echte Integrationsgrenzen: Im synchronen <code>beforeprint</code>-Callback muss etwa ein Drucklayout im DOM stehen, bevor der Browser den Druckdialog öffnet. Dort kann ein eng begrenztes <code>flushSync(() =&gt; setIsPrinting(true))</code> gerechtfertigt sein.</p>
+
+  <h2>Diagramm</h2>
+  <figure>
+    <pre class="mermaid">flowchart TD
+  A[State-Update] --&gt; B{DOM sofort benötigt?}
+  B -- nein --&gt; C[Normal rendern]
+  B -- React besitzt Ablauf --&gt; D[Layout Effect nach Commit]
+  B -- Fremd-API braucht DOM vor Rückkehr --&gt; E[flushSync als letzter Ausweg]</pre>
+    <figcaption class="fallback">Textliche Erklärung: Normale Updates bleiben planbar. DOM-Arbeit innerhalb eines React-Ablaufs wartet auf den Commit; nur eine fremde synchrone API rechtfertigt einen erzwungenen Flush vor der nächsten Zeile.</figcaption>
+  </figure>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>flushSync</code> darf nicht während Rendern, <code>useEffect</code> oder <code>useLayoutEffect</code> aufgerufen werden.</li>
+    <li>Ein Layout Effect läuft nur im Client; serverseitig existiert kein Layout zum Messen.</li>
+    <li>Globale DOM-Abfragen koppeln Komponenten stärker als ein lokaler Ref.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Baue in zehn Minuten eine Liste mit „Hinzufügen“-Button. Frage unmittelbar nach <code>setItems</code> im Handler das neue Element ab und protokolliere das Ergebnis. Verschiebe dieselbe Abfrage anschließend in <code>useLayoutEffect</code>. Erwartung: Der Handler arbeitet noch mit dem alten DOM; der Layout Effect findet den Knoten nach dem Commit. Miss bei Interesse beide Varianten im React Profiler, statt eine Geschwindigkeitsaussage abzuleiten.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>State-Snapshots:</strong> Handler lesen Werte ihres Renderings, nicht den angeforderten Folgezustand.</li>
+    <li><strong>Refs:</strong> Sie begrenzen imperative DOM-Fähigkeiten auf den tatsächlich besessenen Knoten.</li>
+    <li><strong>Suspense:</strong> Ein erzwungener Flush kann eine ausstehende Boundary wieder in den Fallback versetzen.</li>
+    <li><strong>Performance-Messung:</strong> Commit-Dauer und Interaktionslatenz gehören in den Profiler, nicht in Vermutungen.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://react.dev/reference/react-dom/flushSync">React: flushSync</a></li>
+    <li><a href="https://react.dev/reference/react/useLayoutEffect">React: useLayoutEffect</a></li>
+    <li><a href="https://react.dev/learn/state-as-a-snapshot">React: State as a Snapshot</a></li>
+    <li><a href="https://react.dev/reference/react-dom">React DOM APIs</a></li>
+    <li><a href="https://react.dev/versions">React: Versions</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+  </ul>
+
+  <hr>
+  <div class="footer-lines">
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 22.11.2026 | flushSync ist eine Integrationsgrenze, kein Update-Modus | React-Render-Verhalten | Tief;</p>
+    <p>Bereich-Rotation: heute React-Render-Verhalten → morgen z. B. TypeScript-Typsystem;</p>
+    <p>Unsicher geblieben: Ein vollständiger TSX-Compile- und React-Lauf war lokal ohne installierten TypeScript-Compiler sowie React-Pakete nicht möglich.</p>
+  </div>
+</article></main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
