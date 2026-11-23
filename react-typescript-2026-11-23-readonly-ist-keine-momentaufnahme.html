@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Readonly beschreibt Zugriff, nicht Besitz</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#faf9f7;--paper:#fff;--text:#202124;--muted:#62666d;--accent:#3559d8;--line:#dfe2e7;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101216;--paper:#171a20;--text:#e8eaf0;--muted:#aeb3bf;--accent:#9aafff;--line:#343943;--code:#20242c;--note:#1d2744}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><code>Readonly</code> beschreibt Zugriff, nicht Besitz</h1>
+    <p class="subtitle">Langlebige Caches brauchen eine Momentaufnahme – eine schreibgeschützte Sicht reicht nicht.</p>
+    <p class="meta">TypeScript-Typsystem · TypeScript 6.0 + ECMAScript 2025 · Tief · ~8 min</p>
+  </header>
+
+  <p class="lead">Ein Warenkorb wird an einen Preis-Cache übergeben. Der Parameter heißt <code>Readonly&lt;Cart&gt;</code>, also scheint der Cache vor späteren Änderungen geschützt. Minuten danach ändert die Oberfläche die Menge eines Artikels. Plötzlich liefert derselbe Cache-Eintrag andere Positionen, obwohl sein gespeicherter Gesamtpreis unverändert blieb. Der Typ war korrekt – nur das Besitzmodell war falsch.</p>
+
+  <h2>TL;DR</h2>
+  <p><code>Readonly&lt;T&gt;</code> verbietet Zuweisungen über diesen typisierten Zugriffspfad. Es erzeugt weder eine Kopie noch Runtime-Schutz und ist nur flach. Wenn eine Funktion Daten länger aufbewahrt als der Aufruf dauert, muss sie entscheiden: Speichert sie eine live veränderliche Sicht oder übernimmt sie eine Momentaufnahme? Für einen Snapshot kopierst du an der Besitzgrenze die relevanten Ebenen; <code>Object.freeze</code> kann zusätzlich Runtime-Schreibversuche sichtbar machen, bleibt aber ebenfalls flach.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest strukturelle Typisierung, Objekt-Aliase und Utility Types kennen. Das TypeScript-Handbuch dokumentiert, dass <a href="https://www.typescriptlang.org/docs/handbook/utility-types.html#readonlytype"><code>Readonly&lt;T&gt;</code> Properties auf <code>readonly</code> setzt</a>. Entscheidend ist der ergänzende Hinweis zu <a href="https://www.typescriptlang.org/docs/handbook/2/objects.html#readonly-properties"><code>readonly</code>-Properties und Aliasing</a>: Der Modifier ändert kein Runtime-Verhalten, und kompatible veränderliche Aliase können dasselbe Objekt weiterhin verändern. Der Versionsbezug ist <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p><code>readonly</code> ist eine Fähigkeitseinschränkung des Betrachters, keine Eigenschaft des betrachteten JavaScript-Objekts. Zwei Variablen können auf dieselbe Identität zeigen: Eine erlaubt Schreiben, die andere nicht. Der Compiler prüft nur den jeweiligen Pfad. Deshalb ist <code>Readonly&lt;T&gt;</code> hervorragend für lokale API-Absichten, aber kein Beleg dafür, dass ein gespeicherter Wert zeitlich stabil bleibt.</p>
+  <div class="callout"><strong>Die Designfrage lautet nicht:</strong> „Darf diese Funktion mutieren?“ Sondern: „Darf eine andere Stelle die Daten verändern, während diese Funktion sie aufbewahrt?“</div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Der Cache akzeptiert eine schreibgeschützte Sicht, speichert aber dieselbe Referenz. Außerdem schützt das Utility Type nur die oberste Ebene: Das Array und seine Artikel bleiben über andere Aliase veränderlich.</p>
+  <pre><code>// Vollständiges TypeScript-Modul; keine Imports erforderlich.
+type CartItem = { sku: string; quantity: number; unitPrice: number };
+type Cart = { customerId: string; items: CartItem[] };
+type Quote = { cart: Readonly&lt;Cart&gt;; total: number };
+
+const quotes = new Map&lt;string, Quote&gt;();
+
+function rememberQuote(cart: Readonly&lt;Cart&gt;): void {
+  const total = cart.items.reduce(
+    (sum, item) =&gt; sum + item.quantity * item.unitPrice,
+    0,
+  );
+  quotes.set(cart.customerId, { cart, total });
+}
+
+const cart: Cart = {
+  customerId: "c-17",
+  items: [{ sku: "A", quantity: 1, unitPrice: 20 }],
+};
+
+rememberQuote(cart);
+cart.items[0].quantity = 3; // erlaubt: veränderlicher Alias
+
+// Gespeicherte Position sagt 60, gespeicherter total bleibt 20.</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p>Beim Aufruf wird kein neues Objekt erzeugt. <code>cart</code> und <code>quote.cart</code> zeigen auf dieselbe Objektgrafik. TypeScript entfernt Typen beim Emit; der JavaScript-Heap kennt den Modifier nicht. Selbst ein eigenes <code>DeepReadonly</code> würde nur weitere Schreibpfade im TypeScript-Code sperren, aber weiterhin weder kopieren noch fremde JavaScript-Aufrufer, Typumgehungen oder bereits vorhandene veränderliche Aliase kontrollieren.</p>
+  <p>Die Symptome sind kausal: Der Cache speichert einen berechneten Wert und eine live veränderliche Eingabe unter derselben semantischen Annahme „Quote“. Das Objekt kann dadurch intern widersprüchlich werden. Der Fehler hängt nicht von Last ab und ist keine Performancefrage; er entsteht bereits bei einem einzigen Alias.</p>
+
+  <h2>So macht man es richtig</h2>
+  <p>Eine Quote ist ein historischer Wert. Die Cache-Grenze übernimmt deshalb eine domänenspezifische Momentaufnahme. Kopiere genau die Ebenen, deren spätere Änderung die Aussage der Quote verändern würde, und drücke die neue Besitzlage anschließend mit readonly-Typen aus.</p>
+  <pre><code>type CartItemSnapshot = Readonly&lt;CartItem&gt;;
+type CartSnapshot = Readonly&lt;{
+  customerId: string;
+  items: readonly CartItemSnapshot[];
+}&gt;;
+type Quote = Readonly&lt;{ cart: CartSnapshot; total: number }&gt;;
+
+function snapshotCart(cart: Cart): CartSnapshot {
+  return {
+    customerId: cart.customerId,
+    items: cart.items.map(item =&gt; ({ ...item })),
+  };
+}
+
+function rememberQuote(cart: Cart): void {
+  const snapshot = snapshotCart(cart);
+  const total = snapshot.items.reduce(
+    (sum, item) =&gt; sum + item.quantity * item.unitPrice,
+    0,
+  );
+  quotes.set(snapshot.customerId, { cart: snapshot, total });
+}</code></pre>
+  <p>Der Preis ist zusätzlicher Speicher und das Kopieren kostet proportional zur Zahl der Positionen. Dafür besitzt der Cache eine stabile Aussage. Alternative: Speichere nur normalisierte primitive Felder oder serialisiere am Rand. <code>structuredClone</code> ist für kompatible Daten bequem, kopiert aber bewusst nach Plattformregeln und ersetzt keine Domänenentscheidung. <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze"><code>Object.freeze</code></a> verhindert Änderungen am eingefrorenen Objekt zur Laufzeit, ist jedoch flach; rekursives Einfrieren kostet Traversierung und kann bei fremden Objektgraphen unerwünscht sein.</p>
+
+  <h2>Diagramm</h2>
+  <pre class="mermaid">flowchart TD
+    A[Veränderlicher Warenkorb] --> B{Grenze übernimmt Besitz?}
+    B -- nein --> C[Readonly-Sicht auf selben Alias]
+    C --> D[Spätere Mutation verändert Cache-Daten]
+    B -- ja --> E[Domänensnapshot mit neuen Identitäten]</pre>
+  <p class="fallback">Textliche Erklärung: Ohne Kopie bleibt der Cache an die veränderliche Identität des Aufrufers gekoppelt. Erst neue Identitäten an der Besitzgrenze machen die gespeicherte Quote zu einer Momentaufnahme.</p>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>Readonly&lt;T&gt;</code> ist flach; verschachtelte Arrays und Objekte brauchen eigene readonly-Typen.</li>
+    <li>Ein Spread kopiert ebenfalls nur eine Ebene. Die benötigte Tiefe folgt der Domäne, nicht einem universellen Rezept.</li>
+    <li>Getter, Klasseninstanzen, Maps und zyklische Graphen verlangen eine bewusste Snapshot-Strategie.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Führe das erste Beispiel in fünf Minuten aus und protokolliere nach der Mutation <code>quotes.get("c-17")</code>. Erwartung: <code>total</code> ist 20, die gespeicherte Position berechnet inzwischen 60. Ersetze anschließend die Referenz durch <code>snapshotCart(cart)</code>. Die Mutation am ursprünglichen Warenkorb verändert den Cache nicht mehr. Ergänze testweise nur <code>Object.freeze(cart)</code>: Die verschachtelte Menge bleibt änderbar und demonstriert den flachen Runtime-Schutz.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>Defensive Copies:</strong> Sie machen Besitzübertragung explizit, besonders an Modul- und Worker-Grenzen.</li>
+    <li><strong>Strukturelle Gleichheit:</strong> Snapshots erleichtern Vergleiche nur, wenn ihre Identitätsstrategie konsistent ist.</li>
+    <li><strong>Serialisierung:</strong> JSON kann einen Snapshot erzeugen, verliert aber Typen und besondere JavaScript-Werte.</li>
+    <li><strong>Persistente Datenstrukturen:</strong> Sie teilen unveränderte Teilbäume und tauschen Implementierungskomplexität gegen günstigere Versionierung.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/utility-types.html#readonlytype">TypeScript: Utility Types – Readonly</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/objects.html#readonly-properties">TypeScript: Object Types – readonly und Aliasing</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze">MDN: Object.freeze()</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/structuredClone">MDN: structuredClone()</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+  </ul>
+
+  <hr>
+  <div class="footer-lines">
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 23.11.2026 | Readonly beschreibt Zugriff, nicht Besitz | TypeScript-Typsystem | Tief;</p>
+    <p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. verbindendes Thema;</p>
+    <p>Unsicher geblieben: Ein vollständiger TypeScript-Compile war lokal ohne installierten TypeScript-Compiler nicht möglich.</p>
+  </div>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
