@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein erfolgreicher Request hat nicht immer einen Body</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#faf9f7;--paper:#fff;--text:#202124;--muted:#62666d;--accent:#3559d8;--line:#dfe2e7;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101216;--paper:#171a20;--text:#e8eaf0;--muted:#aeb3bf;--accent:#9aafff;--line:#343943;--code:#20242c;--note:#1d2744}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Ein erfolgreicher Request hat nicht immer einen Body</h1>
+    <p class="subtitle">Modelliere JSON und „No Content“ als verschiedene Endpoint-Verträge, statt jede 2xx-Antwort blind zu parsen.</p>
+    <p class="meta">Datenzugriff &amp; API-Modellierung · TypeScript 6.0 + Fetch API · Tief · ~8 min</p>
+  </header>
+
+  <p class="lead">Das Löschen eines Projekts funktioniert auf dem Server: Status <code>204 No Content</code>, Datenbankzeile entfernt. Im Frontend erscheint trotzdem „Aktion fehlgeschlagen“. Der Stacktrace endet in <code>response.json()</code>, weil die zentrale Request-Funktion aus jedem erfolgreichen Status ein <code>T</code> machen will. Der Transport war erfolgreich; erst der Client hat eine nicht vorhandene Repräsentation verlangt.</p>
+
+  <h2>TL;DR</h2>
+  <p>Ein Status im 2xx-Bereich garantiert keinen JSON-Body. RFC 9110 schließt Content unter anderem bei <code>204</code>, <code>304</code> und Antworten auf <code>HEAD</code> aus. Deshalb gehört die erwartete Body-Form in den Endpoint-Vertrag: Ein JSON-Endpunkt besitzt einen Decoder und liefert <code>T</code>; ein Empty-Endpunkt erwartet einen bodylosen Status und liefert <code>void</code>. So kann der Aufrufer keinen Wert verwenden, den HTTP niemals zugesagt hat.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest <code>fetch</code>, Overloads, discriminated unions und <code>unknown</code> kennen. <a href="https://www.rfc-editor.org/rfc/rfc9110.html#name-content">RFC 9110 beschreibt, wann Responses keinen Content enthalten</a>. MDN dokumentiert <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/204"><code>204 No Content</code></a> sowie <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/json"><code>Response.json()</code></a>, das den Body liest und als JSON parst. Der Versionsbezug ist <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Der Rückgabetyp einer HTTP-Abstraktion beschreibt nicht nur Nutzdaten, sondern ein Protokoll: Status, Content-Art und Decoder müssen zusammenpassen. Ein freies <code>&lt;T&gt;</code> lässt dagegen allein den Aufrufer bestimmen, was angeblich aus dem Netz kommt. Der Compiler bestätigt dann einen Wunsch, nicht den Endpoint.</p>
+  <div class="callout"><strong>Die zentrale Entscheidung:</strong> Nicht der erfolgreiche Status entscheidet, ob geparst wird, sondern der zuvor deklarierte Response-Vertrag.</div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Die typische Hilfsfunktion prüft <code>response.ok</code> und parst danach ausnahmslos JSON. Der Cast betrifft nur TypeScript; er erzeugt weder einen Body noch validiert er dessen Form.</p>
+  <pre><code>// Vollständiges TypeScript-Modul; keine Imports erforderlich.
+async function request&lt;T&gt;(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise&lt;T&gt; {
+  const response = await fetch(input, init);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json() as Promise&lt;T&gt;;
+}
+
+type Deleted = { deleted: true };
+
+// Server antwortet korrekt mit 204 und leerem Body.
+const result = await request&lt;Deleted&gt;("/api/projects/42", {
+  method: "DELETE",
+});
+
+console.log(result.deleted); // wird nie erreicht</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p><code>response.ok</code> bedeutet lediglich, dass der Status zwischen 200 und 299 liegt. Es sagt nichts über das Medienformat aus. Bei <code>204</code> darf die Response keinen Content enthalten; ein JSON-Parser kann aus leerer Eingabe keinen Wert konstruieren. Der Fehler tritt daher nach einem erfolgreichen DELETE auf und wird leicht fälschlich als Netzwerk- oder Serverfehler behandelt.</p>
+  <p>Auch <code>T | undefined</code> repariert das Design nicht: Dann muss jeder JSON-Aufrufer defensiv mit einem Zustand umgehen, der für seinen Endpoint vielleicht unmöglich ist. Die Body-Variante ist eine Eigenschaft des Endpoints und sollte dort diskriminiert werden.</p>
+
+  <h2>So macht man es richtig</h2>
+  <p>Die Endpoint-Beschreibung koppelt Methode, Pfad und Response-Form. JSON wird zunächst als <code>unknown</code> gelesen und von einem endpoint-spezifischen Decoder geprüft. Empty verlangt hier bewusst <code>204</code>; andere APIs könnten zusätzlich <code>205</code> oder einen <code>HEAD</code>-Vertrag modellieren.</p>
+  <pre><code>type Decoder&lt;T&gt; = (value: unknown) =&gt; T;
+
+type JsonEndpoint&lt;T&gt; = Readonly&lt;{
+  path: string;
+  method: "GET" | "POST" | "PUT";
+  response: { kind: "json"; decode: Decoder&lt;T&gt; };
+}&gt;;
+
+type EmptyEndpoint = Readonly&lt;{
+  path: string;
+  method: "DELETE";
+  response: { kind: "empty"; status: 204 };
+}&gt;;
+
+async function call&lt;T&gt;(endpoint: JsonEndpoint&lt;T&gt;): Promise&lt;T&gt;;
+async function call(endpoint: EmptyEndpoint): Promise&lt;void&gt;;
+async function call&lt;T&gt;(
+  endpoint: JsonEndpoint&lt;T&gt; | EmptyEndpoint,
+): Promise&lt;T | void&gt; {
+  const response = await fetch(endpoint.path, { method: endpoint.method });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  if (endpoint.response.kind === "empty") {
+    if (response.status !== endpoint.response.status) {
+      throw new Error(`Erwartet 204, erhalten ${response.status}`);
+    }
+    return;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(`Erwartet JSON, erhalten ${contentType || "ohne Typ"}`);
+  }
+  const raw: unknown = await response.json();
+  return endpoint.response.decode(raw);
+}
+
+const deleteProject = {
+  path: "/api/projects/42",
+  method: "DELETE",
+  response: { kind: "empty", status: 204 },
+} satisfies EmptyEndpoint;
+
+await call(deleteProject); // Promise&lt;void&gt;</code></pre>
+  <p>Der zusätzliche Vertrag erzeugt mehr Definitionen, dafür liegen Protokollwissen und Laufzeitprüfung an einer Stelle. Eine schlankere Alternative ist, rohe <code>Response</code>-Objekte zurückzugeben und jeden Aufrufer parsen zu lassen. Das ist flexibel, verteilt aber Status- und Content-Regeln über die Anwendung. Bei generierten OpenAPI-Clients sollte die Spezifikation diese Unterscheidung liefern; eine falsche Spezifikation bleibt dennoch ein Laufzeitproblem.</p>
+
+  <h2>Diagramm</h2>
+  <pre class="mermaid">flowchart TD
+    A[HTTP-Response ist erfolgreich] --> B{Endpoint-Vertrag}
+    B -- JSON --> C[Content-Type prüfen und unknown decodieren]
+    B -- Empty --> D[Erwarteten bodylosen Status prüfen]
+    C --> E[Typisierter Wert oder klarer Vertragsfehler]</pre>
+  <p class="fallback">Textliche Erklärung: Der Status öffnet nur den Erfolgszweig. Erst der Endpoint-Vertrag bestimmt, ob ein Body dekodiert oder gerade seine Abwesenheit geprüft wird.</p>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>304 Not Modified</code> gehört meist in eine Cache-Schicht und ist nicht durch <code>response.ok</code> abgedeckt.</li>
+    <li><code>HEAD</code> liefert Repräsentations-Header ohne Message Body; modelliere die Methode ausdrücklich.</li>
+    <li>Ein JSON-Content-Type beweist noch keine Datenform. Der Decoder bleibt notwendig.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Erzeuge in fünf Minuten <code>new Response(null, { status: 204 })</code> und rufe darauf <code>json()</code> auf. Erwartung: Das Promise wird wegen leerer Eingabe abgelehnt. Prüfe anschließend denselben Response mit dem Empty-Zweig: Status 204 führt ohne Parsing zu <code>undefined</code>. Tausche den Status testweise gegen 200; der deklarierte Empty-Vertrag soll nun einen verständlichen Vertragsfehler liefern.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>Problem Details:</strong> Fehlerantworten benötigen einen eigenen Decoder statt einer angenommenen Erfolgsschematik.</li>
+    <li><strong>Content Negotiation:</strong> <code>Accept</code> und <code>Content-Type</code> sind Teile desselben Medienvertrags.</li>
+    <li><strong>OpenAPI:</strong> Response-Schemas sollten pro Statuscode statt nur pro Operation beschrieben werden.</li>
+    <li><strong>ETag und 304:</strong> Bodylose Revalidierung verbindet HTTP-Semantik mit lokalem Cache-Zustand.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html#name-content">RFC 9110: HTTP Semantics – Content</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/204">MDN: 204 No Content</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/json">MDN: Response.json()</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/ok">MDN: Response.ok</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+  </ul>
+
+  <hr>
+  <div class="footer-lines">
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 24.11.2026 | Ein erfolgreicher Request hat nicht immer einen Body | Datenzugriff &amp; API-Modellierung | Tief;</p>
+    <p>Bereich-Rotation: heute Datenzugriff &amp; API-Modellierung → morgen z. B. React;</p>
+    <p>Unsicher geblieben: Ein vollständiger TypeScript-Compile war lokal ohne installierten TypeScript-Compiler nicht möglich.</p>
+  </div>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
