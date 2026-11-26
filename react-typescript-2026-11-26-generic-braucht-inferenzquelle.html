@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Generic braucht eine Inferenzquelle</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#faf9f7;--paper:#fff;--text:#202124;--muted:#62666d;--accent:#3559d8;--line:#dfe2e7;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101216;--paper:#171a20;--text:#e8eaf0;--muted:#aeb3bf;--accent:#9aafff;--line:#343943;--code:#20242c;--note:#1d2744}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Ein Generic braucht eine Inferenzquelle</h1>
+    <p class="subtitle">Wenn nur der Aufrufer den Rückgabetyp kennt, prüft TypeScript keine Beziehung – es übernimmt eine Behauptung.</p>
+    <p class="meta">TypeScript-Typsystem · TypeScript 6.0 · Tief · ~8 min</p>
+  </header>
+
+  <p class="lead">Nach einem Release stürzt die Einstellungsseite nur bei einigen Bestandskunden ab. Im <code>localStorage</code> liegt noch <code>{"theme":17}</code>, der aktuelle Code erwartet jedoch <code>theme: "light" | "dark"</code>. Der Aufruf <code>load&lt;UserSettings&gt;("settings")</code> kompiliert ohne Warnung. Das Generic sieht präzise aus, hat aber nichts geprüft.</p>
+
+  <h2>TL;DR</h2>
+  <p>Ein Typparameter ist besonders wertvoll, wenn er eine Beziehung zwischen Eingabe und Ausgabe transportiert. Taucht <code>T</code> nur im Rückgabewert auf, kann TypeScript ihn nicht aus einem Laufzeitwert ableiten. Bei <code>load&lt;T&gt;(key)</code> bestimmt der Aufrufer deshalb selbst, was zurückkommen soll. Besser ist <code>load(key, decoder)</code>: Der Decoder akzeptiert <code>unknown</code>, validiert den Wert und liefert <code>T</code>. TypeScript inferiert <code>T</code> aus dieser überprüfbaren Eingabe.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest Generics, Inferenz, <code>unknown</code> und JSON-Grenzen kennen. Das <a href="https://www.typescriptlang.org/docs/handbook/2/generics.html">TypeScript-Handbuch zu Generics</a> zeigt, wie Typinformationen aus Argumenten inferiert und zwischen Positionen weitergereicht werden. <a href="https://www.typescriptlang.org/docs/handbook/2/functions.html#unknown"><code>unknown</code></a> verhindert Zugriffe vor einer Prüfung. MDN beschreibt, dass <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API/Using_the_Web_Storage_API">Web Storage ausschließlich Strings speichert</a>. Der Versionsbezug ist <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Spitze Klammern sind kein Validierungsmechanismus. In einer guten generischen API fließt Typinformation aus einem Argument durch die Funktion zur Ausgabe. Fehlt diese Quelle, ist die explizite Angabe <code>&lt;UserSettings&gt;</code> keine Erkenntnis des Compilers, sondern eine Zusicherung des Callers. Sie ähnelt semantisch einem Cast, auch wenn die Syntax freundlicher wirkt.</p>
+  <div class="callout"><strong>Die zentrale Entscheidung:</strong> Lass den Rückgabetyp aus einem Wert inferieren, der die behauptete Struktur zur Laufzeit belegen kann.</div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Die Funktion erlaubt für denselben Schlüssel beliebige, sogar widersprüchliche Typargumente. Der Cast hinter <code>JSON.parse</code> verbindet die Behauptung mit dem Rückgabewert, ohne die gespeicherten Daten anzusehen.</p>
+  <pre><code>// storage.ts – vollständiges TypeScript-Modul ohne Abhängigkeiten
+export function load&lt;T&gt;(key: string): T | null {
+  const raw = localStorage.getItem(key);
+  return raw === null ? null : (JSON.parse(raw) as T);
+}
+
+type UserSettings = {
+  theme: "light" | "dark";
+  compact: boolean;
+};
+
+const settings = load&lt;UserSettings&gt;("settings");
+const count = load&lt;number&gt;("settings"); // ebenfalls erlaubt
+
+settings?.theme.toUpperCase();
+// Bei {"theme":17,"compact":true}: TypeError zur Laufzeit</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p><code>T</code> kommt in keinem Parameter vor. Der Compiler besitzt daher keine Inferenzquelle, die <code>UserSettings</code> mit dem Schlüssel oder dem JSON-Text verknüpft. Nach dem Kompilieren ist <code>T</code> vollständig gelöscht; <code>JSON.parse</code> kann jede gültige JSON-Form erzeugen. Das beobachtbare Symptom erscheint erst beim ersten Zugriff, oft weit entfernt von der Speichergrenze.</p>
+  <p>Auch <code>load&lt;T extends object&gt;</code> löst das nicht. Die Constraint verbietet zwar <code>number</code>, beweist aber weder <code>theme</code> noch <code>compact</code>. Sie begrenzt Behauptungen, validiert jedoch keine Daten.</p>
+
+  <h2>So macht man es richtig</h2>
+  <p>Der Decoder ist ein Wert und damit eine echte Eingabe. Er übernimmt die Laufzeitprüfung; seine Rückgabe liefert TypeScript zugleich die Inferenzquelle für <code>T</code>. Ungültiges JSON und veraltete Strukturen scheitern direkt an der Grenze.</p>
+  <pre><code>export type Decoder&lt;T&gt; = (value: unknown) =&gt; T;
+
+export function load&lt;T&gt;(key: string, decode: Decoder&lt;T&gt;): T | null {
+  const raw = localStorage.getItem(key);
+  if (raw === null) return null;
+  const parsed: unknown = JSON.parse(raw);
+  return decode(parsed);
+}
+
+type UserSettings = {
+  theme: "light" | "dark";
+  compact: boolean;
+};
+
+function isRecord(value: unknown): value is Record&lt;string, unknown&gt; {
+  return typeof value === "object" &amp;&amp; value !== null;
+}
+
+const decodeSettings: Decoder&lt;UserSettings&gt; = (value) =&gt; {
+  if (
+    !isRecord(value) ||
+    (value.theme !== "light" &amp;&amp; value.theme !== "dark") ||
+    typeof value.compact !== "boolean"
+  ) {
+    throw new Error("Ungültige UserSettings im Storage");
+  }
+  return { theme: value.theme, compact: value.compact };
+};
+
+const settings = load("settings", decodeSettings);
+// Inferiert: UserSettings | null</code></pre>
+  <p>Der Preis ist zusätzlicher Decoder-Code und eine definierte Fehlerstrategie. Für viele Modelle lohnt eine Schema-Bibliothek. Eine andere Alternative ist ein typisiertes Registry-Objekt, das Schlüssel fest mit Decodern koppelt; das verhindert zusätzlich, denselben Schlüssel verschieden zu interpretieren, erhöht aber die zentrale Konfiguration. Bewusst vertrauenswürdige, prozessinterne Daten dürfen einfacher bleiben – persistierte oder externe Daten nicht.</p>
+
+  <h2>Diagramm</h2>
+  <pre class="mermaid">flowchart TD
+    A[Gespeicherter String] --> B[JSON.parse ergibt unbekannten Wert]
+    B --> C{API-Entscheidung}
+    C -- Rückgabe-Generic --> D[Caller behauptet T]
+    C -- Decoder-Argument --> E[Prüfung liefert T oder Fehler]</pre>
+  <p class="fallback">Textliche Erklärung: Beide Wege beginnen mit denselben untypisierten Daten. Nur das Decoder-Argument erzeugt eine überprüfbare Brücke vom Laufzeitwert zum inferierten Rückgabetyp.</p>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>JSON.parse</code> kann bereits bei syntaktisch ungültigem Text werfen. Entscheide, ob du Fehler weitergibst, in ein Result übersetzt oder den Eintrag entfernst.</li>
+    <li>Ein Type Predicate ist selbst eine Zusicherung. Teste Decoder mit fehlenden, falschen und zusätzlichen Feldern.</li>
+    <li>Ein Decoder ist zugleich ein Migrationspunkt: Alte Versionen können bewusst transformiert statt pauschal verworfen werden.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Speichere in fünf bis zehn Minuten nacheinander gültige Einstellungen, <code>{"theme":17,"compact":true}</code> und syntaktisch ungültiges JSON. Die alte API liefert für die ersten beiden Fälle vermeintliche <code>UserSettings</code>; der Fehler entsteht erst bei der Nutzung. Die Decoder-Variante soll gültige Daten liefern und beide Fehlerformen unmittelbar beim Laden mit unterscheidbaren Meldungen stoppen.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>Schema-Inferenz:</strong> Bibliotheken können statischen Typ und Runtime-Schema aus einer Definition ableiten.</li>
+    <li><strong>Key-Registry:</strong> Ein Mapping koppelt Storage-Schlüssel, Decoder und Rückgabetyp zentral.</li>
+    <li><strong>Versionierte Persistenz:</strong> Decoder können alte Datenformen erkennen und migrieren.</li>
+    <li><strong>Result-Typen:</strong> Erwartbare Validierungsfehler lassen sich explizit statt als Exception modellieren.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/generics.html">TypeScript Handbook: Generics</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/2/functions.html#unknown">TypeScript Handbook: unknown</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API/Using_the_Web_Storage_API">MDN: Using the Web Storage API</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse">MDN: JSON.parse()</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+  </ul>
+
+  <hr>
+  <div class="footer-lines">
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 26.11.2026 | Ein Generic braucht eine Inferenzquelle | TypeScript-Typsystem | Tief;</p>
+    <p>Bereich-Rotation: heute TypeScript-Typsystem → morgen z. B. Datenzugriff &amp; Tests;</p>
+    <p>Unsicher geblieben: Ein vollständiger TypeScript-Compile war lokal ohne installierten TypeScript-Compiler nicht möglich.</p>
+  </div>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
