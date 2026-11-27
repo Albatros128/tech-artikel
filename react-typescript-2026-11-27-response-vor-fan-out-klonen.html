@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eine Response muss vor dem Fan-out geklont werden</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#faf9f7;--paper:#fff;--text:#202124;--muted:#62666d;--accent:#3559d8;--line:#dfe2e7;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101216;--paper:#171a20;--text:#e8eaf0;--muted:#aeb3bf;--accent:#9aafff;--line:#343943;--code:#20242c;--note:#1d2744}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Eine Response muss vor dem Fan-out geklont werden</h1>
+    <p class="subtitle">Ein Fetch-Body ist kein wiederverwendbarer Wert. Sobald mehrere Verbraucher ihn brauchen, wird seine Besitzfrage zur Architekturentscheidung.</p>
+    <p class="meta">Datenzugriff &amp; Caching · TypeScript 6.0 + Fetch/Cache API · Tief · ~8 min</p>
+  </header>
+
+  <p class="lead">Die Offline-Version funktioniert im Test, scheitert aber nach dem nächsten Telemetrie-Feature. Der Service Worker liest aus jeder JSON-Antwort eine Schema-Version, legt die Antwort anschließend in den Cache und gibt sie an die React-App weiter. Plötzlich wirft <code>response.clone()</code> einen <code>TypeError</code>. Netzwerkstatus und Payload sind korrekt; verbraucht wurde lediglich der falsche Besitzanspruch.</p>
+
+  <h2>TL;DR</h2>
+  <p>Der Body einer <code>Response</code> ist ein Stream und grundsätzlich nur einmal konsumierbar. <code>json()</code>, <code>text()</code>, die Cache API und die Seite konkurrieren deshalb um dieselben Bytes. Wenn eine Antwort mehrere Verbraucher hat, klonst du sie unmittelbar am Fan-out – vor dem ersten Lesen. Jeder Zweig erhält genau eine <code>Response</code>. Das macht den Datenfluss sichtbar, verhindert zeitabhängige Fehler und zwingt dich, Speicher- und Lebenszeitkosten bewusst zu behandeln.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest Service Worker, Promises und die Fetch API kennen. MDN erklärt die <a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">einmalige Nutzung von Response-Bodies</a>, die Bedeutung von <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/bodyUsed"><code>bodyUsed</code></a> und das Verhalten von <a href="https://developer.mozilla.org/en-US/docs/Web/API/Cache/put"><code>Cache.put()</code></a>. Das Beispiel bezieht sich auf <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a> mit <code>lib: ["ES2024", "WebWorker"]</code>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Eine <code>Response</code> sieht wie ein gewöhnliches Objekt aus, trägt aber eine lineare Ressource: ihren Body. TypeScript bildet diesen Zustandswechsel nicht im Typ ab. Vor und nach <code>await response.json()</code> lautet der statische Typ weiterhin <code>Response</code>; zur Laufzeit wechselt <code>bodyUsed</code> jedoch von <code>false</code> auf <code>true</code>.</p>
+  <div class="callout"><strong>Die Designentscheidung:</strong> Klone nicht als Reparatur vor dem zweiten Lesen. Klone an der Stelle, an der ein Besitzer zu mehreren Verbrauchern wird.</div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Der folgende Service Worker erweitert eine bestehende Network-first-Strategie um eine Prüfung. Die Reihenfolge wirkt lokal: erst inspizieren, dann cachen. Genau dadurch ist der Body bereits gestört, bevor der zweite Zweig entsteht.</p>
+  <pre><code>// sw.ts – fehlerhafte, aber realistische Variante
+declare const self: ServiceWorkerGlobalScope;
+export {};
+
+async function inspectVersion(response: Response): Promise&lt;void&gt; {
+  const data: unknown = await response.json();
+  console.debug("Schema empfangen", data);
+}
+
+async function load(request: Request): Promise&lt;Response&gt; {
+  const network = await fetch(request);
+  await inspectVersion(network);       // Body wird konsumiert
+
+  const cacheCopy = network.clone();   // TypeError: Body schon benutzt
+  const cache = await caches.open("api-v3");
+  await cache.put(request, cacheCopy);
+  return network;
+}
+
+self.addEventListener("fetch", (event) =&gt; {
+  if (event.request.method === "GET") {
+    event.respondWith(load(event.request));
+  }
+});</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p><code>json()</code> liest den Stream vollständig. <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/clone">Laut MDN wirft <code>clone()</code> nach der Benutzung des Bodys</a>. Selbst ohne explizite Inspektion bleibt das Problem: <code>Cache.put()</code> konsumiert die übergebene Antwort, während der Browser den zurückgegebenen Body ebenfalls lesen muss. Das Symptom hängt daher davon ab, welcher Verbraucher zuerst zugreift – nicht von der fachlichen Gültigkeit der Antwort.</p>
+  <p>Ein Check von <code>bodyUsed</code> heilt die Architektur nicht. Er entdeckt nur, dass der Besitzvertrag bereits verletzt wurde. Wer dann still auf Caching oder Auslieferung verzichtet, verwandelt einen deterministischen Fehler in inkonsistentes Offline-Verhalten.</p>
+
+  <h2>So macht man es richtig mit Trade-offs</h2>
+  <p>Erzeuge alle Zweige direkt nach <code>fetch()</code>. Das Original gehört der Seite, ein Klon dem Cache und ein weiterer der Inspektion. <code>event.waitUntil()</code> hält den Service Worker für die Hintergrundarbeit am Leben, ohne die Auslieferung unnötig darauf warten zu lassen.</p>
+  <pre><code>// sw.ts – vollständiger Ausschnitt, TypeScript 6.0 / WebWorker-Lib
+declare const self: ServiceWorkerGlobalScope;
+export {};
+
+async function inspectVersion(response: Response): Promise&lt;void&gt; {
+  const data: unknown = await response.json();
+  console.debug("Schema empfangen", data);
+}
+
+async function load(
+  request: Request,
+  event: FetchEvent,
+): Promise&lt;Response&gt; {
+  const network = await fetch(request);
+  if (!network.ok) return network;
+
+  // Fan-out: alle Besitzverhältnisse entstehen vor dem ersten Lesen.
+  const forCache = network.clone();
+  const forInspection = network.clone();
+
+  const background = Promise.all([
+    caches.open("api-v3").then((cache) =&gt; cache.put(request, forCache)),
+    inspectVersion(forInspection),
+  ]).then(() =&gt; undefined);
+
+  event.waitUntil(background);
+  return network;
+}
+
+self.addEventListener("fetch", (event) =&gt; {
+  if (event.request.method === "GET") {
+    event.respondWith(load(event.request, event));
+  }
+});</code></pre>
+  <p>Der Preis ist real: <code>clone()</code> teilt den Stream intern auf. Wenn Zweige unterschiedlich schnell lesen, können Daten gepuffert werden; MDN warnt deshalb besonders bei großen Bodies vor ungebremstem Speicherbedarf. Eine Alternative ist, genau einmal in einen <code>ArrayBuffer</code> zu lesen und daraus mehrere Responses zu bauen. Das macht die Kosten explizit, puffert aber immer den gesamten Body und muss Status sowie Header korrekt kopieren. Wenn die Inspektion keinen Produktwert hat, ist Weglassen die billigste Alternative.</p>
+
+  <h2>Diagramm</h2>
+  <pre class="mermaid">flowchart TD
+    A[Netzwerk-Response] --> B{Fan-out vor Verbrauch}
+    B --> C[Original zur Seite]
+    B --> D[Klon in Cache]
+    B --> E[Klon zur Inspektion]</pre>
+  <p class="fallback">Textliche Erklärung: Direkt nach dem Netzwerkzugriff wird die Response in drei Besitzpfade aufgeteilt. Jeder Pfad konsumiert genau einen Body; nachträgliches Klonen ist nicht nötig und nach dem ersten Lesen nicht mehr möglich.</p>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li><code>clone()</code> muss vor jedem Aufruf von <code>json()</code>, <code>text()</code>, <code>blob()</code> oder <code>arrayBuffer()</code> erfolgen.</li>
+    <li>Cache nur Requests und Statuscodes, für die deine Strategie definiert ist; ein erfolgreicher Fetch bedeutet nicht automatisch fachlich cachebare Daten.</li>
+    <li>Fange Fehler der Hintergrundarbeit gezielt ab, wenn ein abgelehntes <code>waitUntil()</code> nicht als fehlgeschlagener Worker-Vorgang gelten soll.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Erzeuge in fünf Minuten in der Browser-Konsole <code>new Response('{"version":3}')</code>. Lies zunächst <code>bodyUsed</code>, rufe <code>json()</code> auf und prüfe den Wert erneut. Versuche danach <code>clone()</code>: Erwartet wird ein <code>TypeError</code>. Wiederhole den Versuch, klone diesmal zuerst und lies Original sowie Klon getrennt. Beide Auswertungen sollen denselben Inhalt liefern.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>ReadableStream-Backpressure:</strong> Sie erklärt, warum langsame Klon-Zweige Speicher binden können.</li>
+    <li><strong>Cache-Strategien:</strong> Network-first und stale-while-revalidate setzen unterschiedliche Fehler- und Frischeverträge.</li>
+    <li><strong>Runtime-Validierung:</strong> Geparstes JSON bleibt an der Systemgrenze zunächst <code>unknown</code>.</li>
+    <li><strong>Service-Worker-Lebenszeit:</strong> <code>waitUntil()</code> koppelt Hintergrundarbeit an das auslösende Event.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">MDN: Using the Fetch API</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/clone">MDN: Response.clone()</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/bodyUsed">MDN: Response.bodyUsed</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Cache/put">MDN: Cache.put()</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers">MDN: Using Service Workers</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+  </ul>
+
+  <hr>
+  <div class="footer-lines">
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 27.11.2026 | Eine Response muss vor dem Fan-out geklont werden | Datenzugriff &amp; Caching | Tief;</p>
+    <p>Bereich-Rotation: heute Datenzugriff &amp; Caching → morgen z. B. React-State-Modellierung;</p>
+    <p>Unsicher geblieben: Ein vollständiger TypeScript-Compile war lokal ohne installierten TypeScript-Compiler nicht möglich.</p>
+  </div>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
