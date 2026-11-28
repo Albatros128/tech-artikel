@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ein Context-Default ersetzt keinen Provider</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#faf9f7;--paper:#fff;--text:#202124;--muted:#62666d;--accent:#3559d8;--line:#dfe2e7;--code:#f2f3f5;--note:#eef2ff}
+    @media(prefers-color-scheme:dark){:root{--bg:#101216;--paper:#171a20;--text:#e8eaf0;--muted:#aeb3bf;--accent:#9aafff;--line:#343943;--code:#20242c;--note:#1d2744}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:18px/1.72 Georgia,"Times New Roman",serif}main{width:min(760px,calc(100% - 32px));margin:0 auto;padding:72px 0 56px}h1,h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(2.5rem,7vw,4.6rem);margin:0 0 22px}h2{font-size:1.75rem;margin:2.8em 0 .7em}.subtitle{font-size:1.35rem;color:var(--muted);line-height:1.45}.meta{font:600 .82rem/1.5 system-ui,sans-serif;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:30px 0 46px}.lead{font-size:1.16rem}.callout{background:var(--note);border-left:4px solid var(--accent);padding:18px 22px;margin:28px 0}a{color:var(--accent);text-underline-offset:3px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}p code,li code{background:var(--code);padding:.12em .3em;border-radius:4px}pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;line-height:1.55;font-size:.82rem}pre code{font-size:inherit}.mermaid{background:var(--paper);text-align:center}.fallback{color:var(--muted);font-size:.95rem}li{margin:.48em 0}hr{border:0;border-top:1px solid var(--line);margin:54px 0 28px}.footer-lines{font:0.88rem/1.55 system-ui,sans-serif;color:var(--muted)}.footer-lines p{margin:.45em 0}@media(max-width:600px){main{padding-top:42px}body{font-size:17px}pre{margin-left:-8px;margin-right:-8px;padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Ein Context-Default ersetzt keinen Provider</h1>
+    <p class="subtitle">Wenn Infrastruktur verpflichtend ist, darf ihr Fehlen nicht wie ein gültiger Anwendungszustand aussehen.</p>
+    <p class="meta">React-Context &amp; State-Modellierung · React 19.3 + TypeScript 6.0 · Tief · ~8 min</p>
+  </header>
+
+  <p class="lead">Nach einer Router-Umstellung verschwindet in einem Teilbaum der „Speichern“-Button. Es gibt keinen Fehler, keinen fehlgeschlagenen Test und keinen auffälligen Logeintrag. Die Komponente hängt außerhalb des Berechtigungs-Providers und liest deshalb den freundlichen Context-Default: einen anonymen Benutzer, der nichts bearbeiten darf. Die Oberfläche reagiert konsistent – auf eine Konfiguration, die niemals gültig sein sollte.</p>
+
+  <h2>TL;DR</h2>
+  <p>Der Wert in <code>createContext(defaultValue)</code> ist kein initialer Provider-State. React verwendet ihn nur, wenn oberhalb des Consumers kein passender Provider existiert; er bleibt statisch. Für optionale Semantik wie ein Standardfarbschema kann das sinnvoll sein. Bei verpflichtender Infrastruktur – Authentifizierung, Berechtigungen, Query-Client oder Router – maskiert ein Dummy-Objekt dagegen einen Strukturfehler. Nutze <code>null</code> als Sentinel und entferne ihn in einem eigenen Hook durch eine Laufzeitprüfung. So wird ein fehlender Provider am ersten Zugriff sichtbar.</p>
+
+  <h2>Prerequisites</h2>
+  <p>Du solltest Context, Hooks und TypeScript-Unions kennen. Die aktuelle <a href="https://react.dev/reference/react/createContext">React-Dokumentation zu <code>createContext</code></a> bezeichnet den Default als statischen „last resort“-Fallback und empfiehlt <code>null</code>, wenn kein sinnvoller Default existiert. <a href="https://react.dev/learn/typescript#usecontext">React: Using TypeScript</a> zeigt den prüfenden Consumer-Hook. Versionsbezug sind <a href="https://react.dev/versions">React 19.3</a> und <a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0</a>.</p>
+
+  <h2>Der Aha-Effekt</h2>
+  <p>Ein Default entscheidet über die Fehlersemantik deiner Komponenten-API. Mit einem Dummy-Wert sagt die API: „Dieser Consumer funktioniert auch ohne Provider.“ Mit <code>null</code> und Guard sagt sie: „Der Provider ist Teil der Vorbedingung.“ Das ist keine Geschmacksfrage, sondern eine Modellierungsentscheidung zwischen gültigem Fallback und verletzter Baumstruktur.</p>
+  <div class="callout"><strong>Die zentrale Entscheidung:</strong> Verwende einen nicht-null Default nur, wenn das Verhalten ohne Provider fachlich vollständig und dauerhaft gültig ist.</div>
+
+  <h2>So macht man es falsch</h2>
+  <p>Der Dummy erleichtert isolierte Tests, weil keine Hülle nötig ist. Gleichzeitig kann Produktionscode denselben Pfad versehentlich nehmen. Das No-op-Verhalten verschluckt die Ursache und zeigt lediglich deren Folge.</p>
+  <pre><code>// access-context.tsx – problematische, aber lauffähige API
+import { createContext, useContext } from "react";
+
+type Access = {
+  userId: string;
+  canEdit(documentId: string): boolean;
+};
+
+const AccessContext = createContext&lt;Access&gt;({
+  userId: "anonymous",
+  canEdit: () =&gt; false,
+});
+
+export function SaveButton({ documentId }: { documentId: string }) {
+  const access = useContext(AccessContext);
+  if (!access.canEdit(documentId)) return null;
+  return &lt;button type="button"&gt;Speichern&lt;/button&gt;;
+}
+
+// Ein fehlender Provider kompiliert und rendert kommentarlos null.
+export function DetachedPanel() {
+  return &lt;SaveButton documentId="contract-42" /&gt;;
+}</code></pre>
+
+  <h2>Warum ist das falsch?</h2>
+  <p><a href="https://react.dev/reference/react/useContext">React sucht den nächsten Provider oberhalb des Consumers</a>. Findet es keinen, liefert <code>useContext</code> exakt den beim Erzeugen angegebenen Default. Der Wert wird nicht zu einem Provider, erhält keine Updates und beweist nicht, dass der Teilbaum korrekt verdrahtet ist. Ein Test, der nur die Abwesenheit des Buttons erwartet, bestätigt daher aus Versehen den Fehlerpfad.</p>
+  <p>Auch ein Default mit Funktionen, die werfen, ist nur eine verstreute Teilreparatur: Jeder Zugriff muss die richtige Funktion treffen. Ein Consumer, der ausschließlich <code>userId</code> liest, bleibt unbemerkt. Die Vorbedingung gehört an eine einzige Zugriffsstelle.</p>
+
+  <h2>So macht man es richtig mit Trade-offs</h2>
+  <p>Der Context bildet die Realität als <code>Access | null</code> ab. Der öffentliche Hook prüft sie einmal und gibt danach den präzisen Typ <code>Access</code> zurück. Consumer importieren den Hook, nicht den rohen Context.</p>
+  <pre><code>// access-context.tsx – vollständiger React-19.3-Ausschnitt
+import {
+  createContext,
+  useContext,
+  type ReactNode,
+} from "react";
+
+export type Access = {
+  userId: string;
+  canEdit(documentId: string): boolean;
+};
+
+const AccessContext = createContext&lt;Access | null&gt;(null);
+
+export function AccessProvider({
+  value,
+  children,
+}: {
+  value: Access;
+  children: ReactNode;
+}) {
+  return &lt;AccessContext value={value}&gt;{children}&lt;/AccessContext&gt;;
+}
+
+export function useAccess(): Access {
+  const value = useContext(AccessContext);
+  if (value === null) {
+    throw new Error("useAccess benötigt einen AccessProvider");
+  }
+  return value;
+}
+
+export function SaveButton({ documentId }: { documentId: string }) {
+  const access = useAccess();
+  if (!access.canEdit(documentId)) return null;
+  return &lt;button type="button"&gt;Speichern&lt;/button&gt;;
+}</code></pre>
+  <p>Der Trade-off ist bewusst laut: Storybook-Stories und Tests müssen einen Provider setzen oder den Fehler ausdrücklich erwarten. Dafür testen sie denselben Vertrag wie die Anwendung. Eine Alternative sind Props; für wiederverwendbare Blätter machen sie Abhängigkeiten sichtbarer und vermeiden globalen Baumzustand. Ein echter Default bleibt sinnvoll, wenn „ohne Provider“ eine vollständige Semantik besitzt – etwa ein optionales Farbschema <code>"system"</code>. Dann ist Fail-fast nicht automatisch besser.</p>
+
+  <h2>Diagramm</h2>
+  <pre class="mermaid">flowchart TD
+    A[Consumer ruft Hook] --> B{Provider oberhalb?}
+    B -- ja --> C[bereitgestellter Wert]
+    B -- nein --> D[statischer Default null]
+    D --> E[Guard meldet Strukturfehler]</pre>
+  <p class="fallback">Textliche Erklärung: Der Consumer erhält entweder den Wert des nächsten Providers oder den statischen Default. Der Null-Guard verwandelt den zweiten Pfad sofort in einen benannten Architekturfehler.</p>
+
+  <h2>Fallstricke am Rand</h2>
+  <ul>
+    <li>Ein vorhandener Provider mit <code>value={undefined}</code> aktiviert den Default nicht; React liefert <code>undefined</code>.</li>
+    <li>Der Provider muss oberhalb des aufrufenden Consumers stehen. Ein Provider, den dieselbe Komponente erst zurückgibt, beeinflusst ihren eigenen Hook-Aufruf nicht.</li>
+    <li>Exportiere den Context nur, wenn externe Provider wirklich Teil der API sein sollen; sonst bleibt der Guard leicht umgehbar.</li>
+  </ul>
+
+  <h2>Selbst ausprobieren</h2>
+  <p>Rendere in fünf bis zehn Minuten <code>SaveButton</code> einmal innerhalb und einmal außerhalb von <code>AccessProvider</code>. Mit dem Dummy-Default verschwindet der zweite Button still. Mit dem Null-Sentinel soll der zweite Render die benannte Fehlermeldung erzeugen. Ergänze anschließend einen Error-Boundary-Test oder einen Test-Helper, der bewusst einen <code>Access</code>-Wert bereitstellt.</p>
+
+  <h2>Verwandte Themen</h2>
+  <ul>
+    <li><strong>Provider-Lebenszeit:</strong> Seine Position bestimmt, wann Context-State erhalten bleibt oder zurückgesetzt wird.</li>
+    <li><strong>Error Boundaries:</strong> Sie können den fail-fast Fehler an einer fachlich sinnvollen Grenze darstellen.</li>
+    <li><strong>Dependency Injection über Props:</strong> Explizite Abhängigkeiten verbessern die Wiederverwendbarkeit kleiner Komponenten.</li>
+    <li><strong>Context-Splitting:</strong> Getrennte Daten- und Aktions-Contexts können unnötig breite Abonnements vermeiden.</li>
+  </ul>
+
+  <h2>Quellen</h2>
+  <ul>
+    <li><a href="https://react.dev/reference/react/createContext">React: createContext</a></li>
+    <li><a href="https://react.dev/reference/react/useContext">React: useContext</a></li>
+    <li><a href="https://react.dev/learn/typescript#usecontext">React: Using TypeScript – useContext</a></li>
+    <li><a href="https://react.dev/versions">React Versions – React 19.3</a></li>
+    <li><a href="https://react.dev/blog/2026/09/09/react-19-3">React 19.3 Release Notes</a></li>
+    <li><a href="https://www.typescriptlang.org/docs/handbook/release-notes/typescript-6-0.html">TypeScript 6.0 Release Notes</a></li>
+    <li><a href="https://mermaid.js.org/config/usage.html">Mermaid: Usage und CDN-Einbindung</a></li>
+  </ul>
+
+  <hr>
+  <div class="footer-lines">
+    <p>Für deine Verlaufsliste (sichere diese Zeile selbst, z. B. in einer Notiz oder Projekt-Wissensdatei): 28.11.2026 | Ein Context-Default ersetzt keinen Provider | React-Context &amp; State-Modellierung | Tief;</p>
+    <p>Bereich-Rotation: heute React-Context &amp; State-Modellierung → morgen z. B. TypeScript-API-Modellierung;</p>
+    <p>Unsicher geblieben: Ein vollständiger TSX-Compile und React-Rendertest waren lokal ohne installierte React-/TypeScript-Abhängigkeiten nicht möglich.</p>
+  </div>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"neutral"});
+</script>
+</body>
+</html>
